@@ -51,7 +51,7 @@ def check_and_install_dependencies():
         print("[✓] Pillow 已安装")
     except ImportError:
         print("[✗] Pillow 未安装")
-        
+
         if sys.platform == "linux":
             if os.path.exists("/etc/debian_version"):
                 cmd = "sudo apt install python3-pil"
@@ -65,7 +65,7 @@ def check_and_install_dependencies():
             else:
                 cmd = "pip install Pillow"
                 pkg = "Pillow"
-            
+
             print(f"\n检测到您的系统需要手动安装Pillow:")
             print(f"  包名: {pkg}")
             print(f"  建议命令: {cmd}")
@@ -80,7 +80,16 @@ def check_and_install_dependencies():
             print("="*60)
             input("\n按回车键退出...")
             sys.exit(1)
-    
+
+    # ── opencv-python（可选，用于视频首帧缩略图）──
+    try:
+        import cv2
+        print("[✓] opencv-python 已安装（支持视频缩略图预览）")
+    except ImportError:
+        cv2 = None
+        print("[!] opencv-python 未安装，视频文件将以文字提示代替预览")
+        print("    安装命令：pip install opencv-python")
+
     print("\n所有依赖检测通过！正在启动程序...\n")
     return True
 
@@ -93,6 +102,13 @@ from tkinter import *
 from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 import subprocess
+
+try:
+    import cv2
+    HAS_CV2 = True
+except ImportError:
+    cv2 = None
+    HAS_CV2 = False
 
 # ── 默认快捷键配置（最多支持 MAX_FOLDERS 个文件夹）──
 MAX_FOLDERS = 9
@@ -732,11 +748,27 @@ class ImageClassifier:
         f = self.all_images[self.ptr]
         ext = os.path.splitext(f)[1].lower()
 
-        if ext in self.vid_ext + self.swf_ext:
+        if ext in self.swf_ext:
+            # Flash 文件无法预览，仅提示
             self.img_label.config(
                 image="",
-                text=f"视频／Flash 文件：{os.path.basename(f)}\n双击此处用默认程序打开",
+                text=f"Flash 文件：{os.path.basename(f)}\n双击此处用默认程序打开",
                 fg='#1a5fb4', font=FONT_NORMAL, bg='white')
+        elif ext in self.vid_ext:
+            # 视频文件：提取首帧缩略图
+            if HAS_CV2:
+                try:
+                    self._show_video_thumbnail(f)
+                except Exception as e:
+                    self.img_label.config(
+                        image="",
+                        text=f"视频文件（无法预览缩略图）：{os.path.basename(f)}\n{e}\n双击此处用默认程序打开",
+                        fg='#c0392b', font=FONT_NORMAL, bg='white')
+            else:
+                self.img_label.config(
+                    image="",
+                    text=f"视频文件：{os.path.basename(f)}\n（安装 opencv-python 可预览缩略图）\n双击此处用默认程序打开",
+                    fg='#1a5fb4', font=FONT_NORMAL, bg='white')
         else:
             try:
                 img = Image.open(f)
@@ -783,6 +815,46 @@ class ImageClassifier:
                 self.img_label.image = ph
             except Exception as e:
                 self.img_label.config(text=f"无法加载图片：{e}", fg='red')
+
+    def _show_video_thumbnail(self, filepath):
+        """用 OpenCV 提取视频首帧，缩放后显示在预览区"""
+        cap = cv2.VideoCapture(filepath)
+        if not cap.isOpened():
+            raise RuntimeError("无法打开视频文件")
+        ret, frame = cap.read()
+        cap.release()
+        if not ret:
+            raise RuntimeError("无法读取视频帧")
+
+        # BGR → RGB → PIL Image
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(frame_rgb)
+
+        frame_w = self.img_frame.winfo_width() - 10
+        frame_h = self.img_frame.winfo_height() - 10
+        if frame_w < 50 or frame_h < 50:
+            return
+
+        # 使用"完整"缩放模式（保持比例适应窗口）
+        img_ratio = img.width / img.height
+        frame_ratio = frame_w / frame_h
+        dont_enlarge = self.dont_enlarge.get()
+
+        if img.width <= frame_w and img.height <= frame_h and dont_enlarge:
+            ph = ImageTk.PhotoImage(img)
+        else:
+            if img_ratio > frame_ratio:
+                new_w = frame_w
+                new_h = int(frame_w / img_ratio)
+            else:
+                new_h = frame_h
+                new_w = int(frame_h * img_ratio)
+            resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            ph = ImageTk.PhotoImage(resized)
+
+        # 在缩略图右下角叠加"视频"标签
+        self.img_label.config(image=ph, text="")
+        self.img_label.image = ph
 
     def update_status_bar(self):
         if self.all_images:
