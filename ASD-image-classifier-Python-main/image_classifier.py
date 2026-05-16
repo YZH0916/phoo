@@ -98,6 +98,8 @@ if __name__ == "__main__":
     check_and_install_dependencies()
 
 import json
+import re
+import datetime
 from tkinter import *
 from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
@@ -505,10 +507,18 @@ class ImageClassifier:
                               highlightthickness=1)
         self.img_frame.pack(fill=BOTH, expand=True, padx=14, pady=(4,6))
         self.img_frame.pack_propagate(False)
-        
+
         self.img_label = Label(self.img_frame, bg='white', anchor=CENTER)
         self.img_label.pack(fill=BOTH, expand=True)
         self.img_label.bind("<Double-Button-1>", self.open_current_file)
+
+        # ── 预览区右上角：文件类型 + 拍摄日期 ──
+        self._info_label = Label(
+            self.img_frame, text="", anchor='ne',
+            bg='white', fg='#333333',
+            font=FONT_SMALL, padx=8, pady=4,
+            justify=RIGHT, relief=FLAT, bd=0)
+        self._info_label.place(relx=1.0, rely=0.0, anchor='ne')
 
         # ── 输出文件夹行（动态生成）──
         self.out_line = Frame(self.root, bg=COLOR_BG)
@@ -743,6 +753,97 @@ class ImageClassifier:
         self.img_label.config(text=msg, fg='#c0392b',
                              font=FONT_NORMAL, bg='white')
 
+    def _get_file_datetime(self, filepath):
+        """
+        获取文件拍摄/创建日期，按优先级：
+        1. EXIF DateTimeOriginal
+        2. EXIF DateTimeDigitized
+        3. 文件名中的日期模式
+        4. 文件修改时间（兜底）
+        返回格式化字符串，如 '2026-05-16 10:40'
+        """
+        ext = os.path.splitext(filepath)[1].lower()
+
+        # ── 1. 图片 EXIF ──
+        if ext in ('.jpg', '.jpeg', '.png', '.tiff', '.bmp'):
+            try:
+                from PIL.ExifTags import Base as ExifBase
+                img = Image.open(filepath)
+                exif = img._getexif()
+                if exif:
+                    # 优先 DateTimeOriginal (36867)
+                    for tag_id in (36867, 36868, 306):
+                        val = exif.get(tag_id)
+                        if val:
+                            # EXIF 格式: "2026:05:16 10:40:28"
+                            try:
+                                dt = datetime.datetime.strptime(val, "%Y:%m:%d %H:%M:%S")
+                                return dt.strftime("%Y-%m-%d %H:%M")
+                            except ValueError:
+                                pass
+            except Exception:
+                pass
+
+        # ── 2. 视频元数据（opencv，仅取创建/修改时间） ──
+        # 视频文件通常没有可靠的拍摄时间，跳到文件名解析
+
+        # ── 3. 从文件名解析日期 ──
+        basename = os.path.splitext(os.path.basename(filepath))[0]
+        # 常见模式（按精确度排序）
+        patterns = [
+            # IMG_20260516_104028, VID_2026-05-16, Screenshot 2026-05-16 等
+            r'(\d{4})[-_](\d{1,2})[-_](\d{1,2})[_\s](\d{1,2})[-_:](\d{1,2})[-_:](\d{1,2})',
+            r'(\d{4})[-_](\d{1,2})[-_](\d{1,2})[_\s](\d{1,2})[-_:](\d{1,2})',
+            r'(\d{4})[-_](\d{1,2})[-_](\d{1,2})[_\s](\d{1,2})',
+            r'(\d{4})[-_](\d{1,2})[-_](\d{1,2})',
+        ]
+        for pat in patterns:
+            m = re.search(pat, basename)
+            if m:
+                groups = [int(g) for g in m.groups()]
+                try:
+                    if len(groups) >= 6:
+                        dt = datetime.datetime(*groups[:6])
+                    elif len(groups) >= 5:
+                        dt = datetime.datetime(*groups[:5])
+                    elif len(groups) >= 4:
+                        dt = datetime.datetime(*groups[:4])
+                    else:
+                        dt = datetime.datetime(*groups[:3])
+                    return dt.strftime("%Y-%m-%d" + (" %H:%M" if len(groups) >= 4 else ""))
+                except ValueError:
+                    continue
+
+        # ── 4. 文件修改时间兜底 ──
+        try:
+            mtime = os.path.getmtime(filepath)
+            dt = datetime.datetime.fromtimestamp(mtime)
+            return dt.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return ""
+
+    def _get_file_type_label(self, filepath):
+        """返回文件类型的中文标签"""
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext in self.vid_ext:
+            return "视频"
+        elif ext in self.swf_ext:
+            return "Flash"
+        elif ext in ('.jpg', '.jpeg'):
+            return "图片 JPEG"
+        elif ext == '.png':
+            return "图片 PNG"
+        elif ext == '.gif':
+            return "图片 GIF"
+        elif ext == '.bmp':
+            return "图片 BMP"
+        elif ext in ('.tiff', '.tif'):
+            return "图片 TIFF"
+        elif ext == '.ico':
+            return "图标 ICO"
+        else:
+            return f"文件 {ext}"
+
     def show_current(self):
         if not self.all_images: return
         f = self.all_images[self.ptr]
@@ -815,6 +916,40 @@ class ImageClassifier:
                 self.img_label.image = ph
             except Exception as e:
                 self.img_label.config(text=f"无法加载图片：{e}", fg='red')
+
+        # ── 更新右上角信息标签 ──
+        self._update_info_label(f)
+
+    def _update_info_label(self, filepath):
+        """更新预览区右上角的文件类型 + 拍摄日期标签"""
+        type_str = self._get_file_type_label(filepath)
+        date_str = self._get_file_datetime(filepath)
+
+        # 判断日期来源，加注释
+        ext = os.path.splitext(filepath)[1].lower()
+        date_note = ""
+        if date_str:
+            basename = os.path.splitext(os.path.basename(filepath))[0]
+            # 检查是否从 EXIF 获取
+            from_exif = False
+            if ext in ('.jpg', '.jpeg', '.png', '.tiff', '.bmp'):
+                try:
+                    img = Image.open(filepath)
+                    exif = img._getexif()
+                    if exif and (36867 in exif or 36868 in exif or 306 in exif):
+                        from_exif = True
+                except Exception:
+                    pass
+            if from_exif:
+                date_note = "(EXIF)"
+            elif re.search(r'\d{4}[-_]\d{1,2}[-_]\d{1,2}', basename):
+                date_note = "(文件名)"
+
+        if date_str:
+            self._info_label.config(
+                text=f"{type_str}  |  📅 {date_str} {date_note}")
+        else:
+            self._info_label.config(text=f"{type_str}")
 
     def _show_video_thumbnail(self, filepath):
         """用 OpenCV 提取视频首帧，缩放后显示在预览区"""
