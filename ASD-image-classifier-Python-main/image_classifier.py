@@ -755,27 +755,25 @@ class ImageClassifier:
 
     def _get_file_datetime(self, filepath):
         """
-        获取文件拍摄/创建日期，按优先级：
-        1. EXIF DateTimeOriginal
-        2. EXIF DateTimeDigitized
-        3. 文件名中的日期模式
+        获取文件拍摄日期，按优先级：
+        1. EXIF DateTimeOriginal / DateTimeDigitized / DateTime
+        2. 文件名中的日期模式（覆盖主流手机/APP命名格式）
+        3. 文件创建时间
         4. 文件修改时间（兜底）
         返回格式化字符串，如 '2026-05-16 10:40'
         """
         ext = os.path.splitext(filepath)[1].lower()
+        basename = os.path.splitext(os.path.basename(filepath))[0]
 
         # ── 1. 图片 EXIF ──
         if ext in ('.jpg', '.jpeg', '.png', '.tiff', '.bmp'):
             try:
-                from PIL.ExifTags import Base as ExifBase
                 img = Image.open(filepath)
                 exif = img._getexif()
                 if exif:
-                    # 优先 DateTimeOriginal (36867)
                     for tag_id in (36867, 36868, 306):
                         val = exif.get(tag_id)
                         if val:
-                            # EXIF 格式: "2026:05:16 10:40:28"
                             try:
                                 dt = datetime.datetime.strptime(val, "%Y:%m:%d %H:%M:%S")
                                 return dt.strftime("%Y-%m-%d %H:%M")
@@ -784,37 +782,77 @@ class ImageClassifier:
             except Exception:
                 pass
 
-        # ── 2. 视频元数据（opencv，仅取创建/修改时间） ──
-        # 视频文件通常没有可靠的拍摄时间，跳到文件名解析
+        # ── 2. 从文件名解析日期 ──
+        #    覆盖常见命名格式：
+        #    IMG_20260516_104028 / VID_20260516-104028
+        #    IMG_2026-05-16_104028 / Screenshot 2026-05-16
+        #    微信图片_20260516104028 / mmexport1652683228354
+        #    照片_2026-05-16-10-40-28 / Screenshot 2026-05-16 at 10.40.28
+        #    AU20260516-104028 / 20260516104028 / 2026_05_16_10_40
+        #    1677721600000 (纯毫秒时间戳) / 1677721600 (纯秒时间戳)
 
-        # ── 3. 从文件名解析日期 ──
-        basename = os.path.splitext(os.path.basename(filepath))[0]
-        # 常见模式（按精确度排序）
-        patterns = [
-            # IMG_20260516_104028, VID_2026-05-16, Screenshot 2026-05-16 等
-            r'(\d{4})[-_](\d{1,2})[-_](\d{1,2})[_\s](\d{1,2})[-_:](\d{1,2})[-_:](\d{1,2})',
-            r'(\d{4})[-_](\d{1,2})[-_](\d{1,2})[_\s](\d{1,2})[-_:](\d{1,2})',
-            r'(\d{4})[-_](\d{1,2})[-_](\d{1,2})[_\s](\d{1,2})',
-            r'(\d{4})[-_](\d{1,2})[-_](\d{1,2})',
+        # 2a. 纯数字时间戳（微信 mmexport 前缀等，13位毫秒或10位秒）
+        ts_match = re.search(r'(?<!\d)(\d{13})(?!\d)', basename)
+        if not ts_match:
+            ts_match = re.search(r'(?<!\d)(\d{10})(?!\d)', basename)
+        if ts_match:
+            ts = int(ts_match.group(1))
+            # 13位=毫秒，10位=秒
+            if ts > 1e12:
+                ts = ts // 1000
+            # 合理年份范围 2000-2099
+            try:
+                dt = datetime.datetime.fromtimestamp(ts)
+                if 2000 <= dt.year <= 2099:
+                    return dt.strftime("%Y-%m-%d %H:%M")
+            except (OSError, ValueError, OverflowError):
+                pass
+
+        # 2b. 带分隔符的日期时间（精确匹配年月日时分秒）
+        dt_patterns = [
+            # 20260516_104028 / 2026-05-16_10-40-28 / 2026_05_16 10_40_28
+            r'(\d{4})[-_](\d{2})[-_](\d{2})[-_\s](\d{1,2})[-_:](\d{1,2})[-_:](\d{1,2})',
+            # 20260516104028 (8+6 连续数字，年月日时分秒)
+            r'(\d{4})(\d{2})(\d{2})[-_]?(?=\d)(\d{2})(\d{2})(\d{2})(?!\d)',
+            # 2026-05-16 at 10.40.28 (iOS 截图)
+            r'(\d{4})[-_](\d{2})[-_](\d{2})\s+at\s+(\d{1,2})\.(\d{1,2})\.(\d{1,2})',
+            # 2026-05-16 10:40:28 / 2026-05-16 10-40-28
+            r'(\d{4})[-_](\d{2})[-_](\d{2})\s+(\d{1,2})[-_:](\d{1,2})[-_:](\d{1,2})',
+            # 2026-05-16 1040 (8位日期+4位时分)
+            r'(\d{4})[-_](\d{2})[-_](\d{2})[-_\s](\d{2})(\d{2})',
+            # 2026-05-16_1040 / 2026_05_16 1040
+            r'(\d{4})[-_](\d{2})[-_](\d{2})[-_\s](\d{2})[-_:]?(\d{2})',
         ]
-        for pat in patterns:
+        for pat in dt_patterns:
             m = re.search(pat, basename)
             if m:
                 groups = [int(g) for g in m.groups()]
                 try:
-                    if len(groups) >= 6:
-                        dt = datetime.datetime(*groups[:6])
-                    elif len(groups) >= 5:
-                        dt = datetime.datetime(*groups[:5])
-                    elif len(groups) >= 4:
-                        dt = datetime.datetime(*groups[:4])
-                    else:
-                        dt = datetime.datetime(*groups[:3])
-                    return dt.strftime("%Y-%m-%d" + (" %H:%M" if len(groups) >= 4 else ""))
+                    dt = datetime.datetime(*groups[:6])
+                    if self._is_valid_date(dt):
+                        return dt.strftime("%Y-%m-%d %H:%M")
                 except ValueError:
                     continue
 
-        # ── 4. 文件创建时间（Windows 上 getctime 返回创建时间）──
+        # 2c. 仅日期（年月日）
+        date_patterns = [
+            # 2026-05-16 / 2026_05_16
+            r'(\d{4})[-_](\d{2})[-_](\d{2})',
+            # 20260516 (8位连续日期)
+            r'(?<!\d)(\d{4})(\d{2})(\d{2})(?!\d)',
+        ]
+        for pat in date_patterns:
+            m = re.search(pat, basename)
+            if m:
+                groups = [int(g) for g in m.groups()]
+                try:
+                    dt = datetime.datetime(*groups[:3])
+                    if self._is_valid_date(dt):
+                        return dt.strftime("%Y-%m-%d")
+                except ValueError:
+                    continue
+
+        # ── 3. 文件创建时间 ──
         try:
             ctime = os.path.getctime(filepath)
             dt = datetime.datetime.fromtimestamp(ctime)
@@ -822,13 +860,19 @@ class ImageClassifier:
         except Exception:
             pass
 
-        # ── 5. 文件修改时间最终兜底 ──
+        # ── 4. 文件修改时间（兜底）──
         try:
             mtime = os.path.getmtime(filepath)
             dt = datetime.datetime.fromtimestamp(mtime)
             return dt.strftime("%Y-%m-%d %H:%M")
         except Exception:
             return ""
+
+    def _is_valid_date(self, dt):
+        """校验日期是否在合理范围内（2000年~明年）"""
+        now = datetime.datetime.now()
+        return (datetime.datetime(2000, 1, 1) <= dt
+                <= datetime.datetime(now.year + 1, 12, 31))
 
     def _get_file_type_label(self, filepath):
         """返回文件类型的中文标签"""
@@ -950,10 +994,11 @@ class ImageClassifier:
                     pass
             if from_exif:
                 date_note = "(EXIF)"
-            elif re.search(r'\d{4}[-_]\d{1,2}[-_]\d{1,2}', basename):
+            elif re.search(r'(?<!\d)(\d{13}|1\d{9})(?!\d)', basename):
+                date_note = "(时间戳)"
+            elif re.search(r'\d{4}[-_]?\d{2}[-_]?\d{2}', basename):
                 date_note = "(文件名)"
             else:
-                # 创建时间或修改时间
                 try:
                     ctime = datetime.datetime.fromtimestamp(os.path.getctime(filepath))
                     ctime_str = ctime.strftime("%Y-%m-%d %H:%M")
