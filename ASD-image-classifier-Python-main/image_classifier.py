@@ -814,7 +814,15 @@ class ImageClassifier:
                 except ValueError:
                     continue
 
-        # ── 4. 文件修改时间兜底 ──
+        # ── 4. 文件创建时间（Windows 上 getctime 返回创建时间）──
+        try:
+            ctime = os.path.getctime(filepath)
+            dt = datetime.datetime.fromtimestamp(ctime)
+            return dt.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            pass
+
+        # ── 5. 文件修改时间最终兜底 ──
         try:
             mtime = os.path.getmtime(filepath)
             dt = datetime.datetime.fromtimestamp(mtime)
@@ -944,6 +952,17 @@ class ImageClassifier:
                 date_note = "(EXIF)"
             elif re.search(r'\d{4}[-_]\d{1,2}[-_]\d{1,2}', basename):
                 date_note = "(文件名)"
+            else:
+                # 创建时间或修改时间
+                try:
+                    ctime = datetime.datetime.fromtimestamp(os.path.getctime(filepath))
+                    ctime_str = ctime.strftime("%Y-%m-%d %H:%M")
+                    if date_str == ctime_str:
+                        date_note = "(创建时间)"
+                    else:
+                        date_note = "(修改时间)"
+                except Exception:
+                    date_note = ""
 
         if date_str:
             self._info_label.config(
