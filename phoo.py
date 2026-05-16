@@ -324,7 +324,7 @@ class KeybindDialog(Toplevel):
                 var.set(DEFAULT_KEYS[i])
 
 
-class ImageClassifier:
+class Phoo:
     def __init__(self, root):
         self.root = root
         self.root.title("图片分类工具")
@@ -360,7 +360,7 @@ class ImageClassifier:
             fieldbackground=[('readonly', 'white')],
             selectbackground=[('readonly', '#cce5ff')])
 
-        self.config_file = "classifier_config.json"
+        self.config_file = "phoo_config.json"
 
         self.input_folder   = StringVar()
         self.inc_subfolders = BooleanVar(value=False)
@@ -1336,5 +1336,5 @@ class ImageClassifier:
 
 if __name__ == "__main__":
     root = Tk()
-    app = ImageClassifier(root)
+    app = Phoo(root)
     root.mainloop()
