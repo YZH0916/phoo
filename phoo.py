@@ -570,6 +570,17 @@ class Phoo:
 
         self.update_display()
 
+    def _open_folder_by_idx(self, idx):
+        """通过索引打开对应的输出文件夹"""
+        path = self.output_folders[idx]["path"].get()
+        if path and os.path.isdir(path):
+            try:
+                os.startfile(path)
+            except Exception as e:
+                messagebox.showerror("错误", f"无法打开文件夹：{e}")
+        else:
+            messagebox.showinfo("提示", f"文件夹{idx + 1} 未设置有效路径")
+
     def _build_output_rows(self):
         """根据 folder_count_var 动态重建输出文件夹区域（网格布局，每行3个）"""
         for w in self.out_line.winfo_children():
@@ -605,10 +616,12 @@ class Phoo:
             e.pack(side=LEFT, fill=X, expand=True, padx=(4, 0))
             self.out_entries.append(e)
 
-            # 文件夹已有照片数标签
+            # 文件夹已有照片数标签（点击可打开文件夹）
             cnt_lbl = Label(cell, text="", bg=COLOR_BG,
-                            font=FONT_SMALL, fg='#52b788', width=6)
+                            font=FONT_SMALL, fg='#52b788', width=6,
+                            cursor='hand2')
             cnt_lbl.pack(side=LEFT, padx=(2, 0))
+            cnt_lbl.bind('<Button-1>', lambda e, idx=i: self._open_folder_by_idx(idx))
             self._folder_count_labels.append(cnt_lbl)
 
             Button(cell, text="✚",
