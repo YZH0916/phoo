@@ -385,6 +385,10 @@ class Phoo:
         self.history = []
         self.skip_stack = []
 
+        # ── 待应用操作队列 ──
+        # 每条: {'action': 'move'|'copy'|'delete', 'src': 原路径, 'dst': 目标路径, 'idx': 原索引}
+        self.pending_actions = []
+
         # ── 进度恢复 ──
         self._saved_ptr = 0          # 从配置读取的上次 ptr
         self._saved_anchor = None    # 上次退出时的锚定文件名（用于精确恢复）
@@ -512,13 +516,16 @@ class Phoo:
         self.img_label.pack(fill=BOTH, expand=True)
         self.img_label.bind("<Double-Button-1>", self.open_current_file)
 
-        # ── 预览区右上角：文件类型 + 拍摄日期 ──
+        # ── 预览区右上角：文件类型 + 拍摄日期 + 扩展元数据 ──
+        self._info_expanded = False  # 是否展开完整元数据
         self._info_label = Label(
             self.img_frame, text="", anchor='ne',
-            bg='white', fg='#333333',
+            bg='#f5f5f5', fg='#333333',
             font=FONT_SMALL, padx=8, pady=4,
-            justify=RIGHT, relief=FLAT, bd=0)
+            justify=RIGHT, relief=FLAT, bd=0,
+            cursor='hand2')
         self._info_label.place(relx=1.0, rely=0.0, anchor='ne')
+        self._info_label.bind('<Button-1>', lambda e: self._toggle_info_expand())
 
         # ── 输出文件夹行（动态生成）──
         self.out_line = Frame(self.root, bg=COLOR_BG)
@@ -545,6 +552,18 @@ class Phoo:
             status_bar, text="", bg=COLOR_STATUS_BG,
             font=FONT_SMALL, fg='#555')
         self._progress_label.pack(side=RIGHT, padx=(0, 4), pady=3)
+
+        # 应用按钮（状态栏右侧，进度条左侧）
+        self._apply_btn = Button(
+            status_bar, text="应用 (0)",
+            command=self.apply_pending,
+            bg='#4CAF50', fg='white',
+            activebackground='#45a049',
+            bd=0, padx=10, pady=2,
+            font=FONT_SMALL, cursor='hand2',
+            state=DISABLED
+        )
+        self._apply_btn.pack(side=RIGHT, padx=(0, 6), pady=3)
 
         # ── 绑定快捷键 ──
         self._bind_hotkeys()
@@ -621,8 +640,8 @@ class Phoo:
         self.root.bind('<Control-z>', lambda e: self.undo())
         self.root.bind('<Tab>', lambda e: self.toggle_copy_mode())
         self.root.bind('<Delete>', lambda e: self.delete_current())
-        self.root.bind('<KeyPress-i>', lambda e: self.show_metadata_dialog())
-        self.root.bind('<KeyPress-I>', lambda e: self.show_metadata_dialog())
+        self.root.bind('<KeyPress-i>', lambda e: self._toggle_info_expand())
+        self.root.bind('<KeyPress-I>', lambda e: self._toggle_info_expand())
 
     def _on_folder_count_change(self):
         """文件夹数量改变时重建 UI"""
@@ -633,11 +652,8 @@ class Phoo:
         self.update_display()
 
     def _refresh_key_preview(self):
-        """刷新快捷键预览文字"""
-        n = self.folder_count_var.get()
-        parts = [f"[{self.hotkeys[i].upper()}]=文件夹{i+1}" for i in range(n)]
-        self._key_preview_var.set("  " + "  ".join(parts) +
-                                   "  [W]=跳过  [Del]=删除  [I]=元数据  [Ctrl+Z]=撤销  [Tab]=切换模式")
+        """刷新底部快捷键提示文字（精简版）"""
+        self._key_preview_var.set("  [W]=跳过  [Del]=删除  [Ctrl+Z]=撤销  [Tab]=切换模式")
 
     def _open_keybind_dialog(self):
         n = self.folder_count_var.get()
@@ -1025,6 +1041,123 @@ class Phoo:
         return (datetime.datetime(2000, 1, 1) <= dt
                 <= datetime.datetime(now.year + 1, 12, 31))
 
+    def _parse_filename_date(self, filepath):
+        """
+        从文件名中解析日期，返回 datetime 对象。
+        如果无法解析则返回 None。
+        优先级与 _get_file_datetime 中的文件名解析部分一致。
+        """
+        basename = os.path.splitext(os.path.basename(filepath))[0]
+
+        # 1. 纯数字时间戳（13位毫秒或10位秒）
+        ts_match = re.search(r'(?<!\d)(\d{13})(?!\d)', basename)
+        if not ts_match:
+            ts_match = re.search(r'(?<!\d)(\d{10})(?!\d)', basename)
+        if ts_match:
+            ts = int(ts_match.group(1))
+            if ts > 1e12:
+                ts = ts // 1000
+            try:
+                dt = datetime.datetime.fromtimestamp(ts)
+                if self._is_valid_date(dt):
+                    return dt
+            except (OSError, ValueError, OverflowError):
+                pass
+
+        # 2. 带分隔符的日期时间（年月日时分秒）
+        dt_patterns = [
+            r'(\d{4})[-_](\d{2})[-_](\d{2})[-_\s](\d{1,2})[-_:](\d{1,2})[-_:](\d{1,2})',
+            r'(\d{4})(\d{2})(\d{2})[-_]?(?=\d)(\d{2})(\d{2})(\d{2})(?!\d)',
+            r'(\d{4})[-_](\d{2})[-_](\d{2})\s+at\s+(\d{1,2})\.(\d{1,2})\.(\d{1,2})',
+            r'(\d{4})[-_](\d{2})[-_](\d{2})\s+(\d{1,2})[-_:](\d{1,2})[-_:](\d{1,2})',
+            r'(\d{4})[-_](\d{2})[-_](\d{2})[-_\s](\d{2})(\d{2})',
+            r'(\d{4})[-_](\d{2})[-_](\d{2})[-_\s](\d{2})[-_:]?(\d{2})',
+        ]
+        for pat in dt_patterns:
+            m = re.search(pat, basename)
+            if m:
+                groups = [int(g) for g in m.groups()]
+                try:
+                    dt = datetime.datetime(*groups[:6])
+                    if self._is_valid_date(dt):
+                        return dt
+                except ValueError:
+                    continue
+
+        # 3. 仅日期（年月日）
+        date_patterns = [
+            r'(\d{4})[-_](\d{2})[-_](\d{2})',
+            r'(?<!\d)(\d{4})(\d{2})(\d{2})(?!\d)',
+        ]
+        for pat in date_patterns:
+            m = re.search(pat, basename)
+            if m:
+                groups = [int(g) for g in m.groups()]
+                try:
+                    dt = datetime.datetime(*groups[:3])
+                    if self._is_valid_date(dt):
+                        return dt
+                except ValueError:
+                    continue
+
+        return None
+
+    def _fix_file_date(self, filepath):
+        """
+        校正文件创建/修改时间：
+        如果文件名中包含的日期与文件系统时间偏差超过 1 天，
+        则将创建时间和修改时间都修正为文件名记录的日期。
+        返回 True 表示已修正，False 表示无需修正。
+        """
+        filename_date = self._parse_filename_date(filepath)
+        if not filename_date:
+            return False
+
+        try:
+            ctime_ts = os.path.getctime(filepath)
+            ctime = datetime.datetime.fromtimestamp(ctime_ts)
+        except Exception:
+            return False
+
+        # 计算偏差天数
+        delta = abs((filename_date - ctime).total_seconds())
+        # 偏差超过 1 天才修正（避免同一天内的小时差异触发）
+        if delta < 86400:  # 86400 秒 = 1 天
+            return False
+
+        # 修正文件的创建时间和修改时间
+        target_ts = filename_date.timestamp()
+        try:
+            os.utime(filepath, (target_ts, target_ts))
+            # Windows 下 os.utime 只改 mtime/atime，ctime 需要额外处理
+            # Windows 的 ctime 是"创建时间"，需要通过 pywin32 或 ctypes 修改
+            if sys.platform == 'win32':
+                try:
+                    import ctypes
+                    from ctypes import wintypes
+                    # 使用 SetFileTime 修改 Windows 创建时间
+                    kernel32 = ctypes.windll.kernel32
+                    handle = kernel32.CreateFileW(
+                        filepath, 0x100000,  # GENERIC_WRITE
+                        0, None, 3,  # OPEN_EXISTING
+                        0x80, None)  # FILE_ATTRIBUTE_NORMAL
+                    if handle != -1:
+                        # Windows FILETIME: 100纳秒单位，从1601-01-01 UTC
+                        epoch = datetime.datetime(1601, 1, 1)
+                        delta_w = filename_date - epoch
+                        ft_value = int(delta_w.total_seconds() * 10_000_000)
+                        ft = wintypes.FILETIME(ft_value & 0xFFFFFFFF,
+                                               ft_value >> 32)
+                        # SetFileTime(hFile, lpCreationTime, lpLastAccessTime, lpLastWriteTime)
+                        kernel32.SetFileTime(handle, ctypes.byref(ft),
+                                            ctypes.byref(ft), ctypes.byref(ft))
+                        kernel32.CloseHandle(handle)
+                except Exception:
+                    pass  # 创建时间修改失败不影响 mtime 已被 os.utime 修正
+            return True
+        except Exception:
+            return False
+
     def _get_file_type_label(self, filepath):
         """返回文件类型的中文标签"""
         ext = os.path.splitext(filepath)[1].lower()
@@ -1120,20 +1253,90 @@ class Phoo:
             except Exception as e:
                 self.img_label.config(text=f"无法加载图片：{e}", fg='red')
 
+        # ── 自动校正文件日期（文件名日期 vs 创建时间偏差 > 1天则修正）──
+        if self._fix_file_date(f):
+            self._flash_status("📅 已校正文件日期为文件名记录的时间", duration=2500)
+
         # ── 更新右上角信息标签 ──
         self._update_info_label(f)
 
-    def _update_info_label(self, filepath):
-        """更新预览区右上角的文件类型 + 拍摄日期 + 设备/参数/GPS 标签"""
+    def _get_video_info(self, filepath):
+        """读取视频元数据，返回结构化字典（分辨率/帧率/时长/总帧数）"""
+        result = {}
+        if not HAS_CV2:
+            return result
+        try:
+            cap = cv2.VideoCapture(filepath)
+            if cap.isOpened():
+                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                if w > 0 and h > 0:
+                    result['分辨率'] = f"{w} × {h}"
+                if fps > 0:
+                    result['帧率'] = f"{fps:.1f} fps"
+                if frames > 0 and fps > 0:
+                    duration = frames / fps
+                    mins = int(duration // 60)
+                    secs = duration % 60
+                    result['时长'] = f"{mins}:{secs:05.2f}"
+                    result['总帧数'] = str(frames)
+                cap.release()
+        except Exception:
+            pass
+        return result
+
+    def _toggle_info_expand(self):
+        """按 I 键或点击切换预览区右上角信息展开/收起"""
+        self._info_expanded = not self._info_expanded
+        if self.all_images:
+            self._update_info_label(self.all_images[self.ptr])
+
+    def _shorten_date(self, date_str):
+        """将 '2024-08-02 15:55' 转为 '2024/8/2 15:55' 短格式"""
+        if not date_str:
+            return date_str
+        # 尝试解析并转为短格式
+        for fmt_in, fmt_out in [
+            ("%Y-%m-%d %H:%M", None),  # 带时间
+            ("%Y-%m-%d", None),         # 仅日期
+        ]:
+            try:
+                dt = datetime.datetime.strptime(date_str, fmt_in)
+                if fmt_in == "%Y-%m-%d %H:%M":
+                    return f"{dt.year}/{dt.month}/{dt.day} {dt.hour}:{dt.minute:02d}"
+                else:
+                    return f"{dt.year}/{dt.month}/{dt.day}"
+            except ValueError:
+                continue
+        # 解析失败原样返回
+        return date_str
+
+    def _resolution_label(self, w, h):
+        """将像素分辨率转为简洁标签，如 1080P/4K/720P"""
+        short_side = min(w, h)
+        if short_side >= 2160:
+            return "4K"
+        elif short_side >= 1080:
+            return "1080P"
+        elif short_side >= 720:
+            return "720P"
+        elif short_side >= 480:
+            return "480P"
+        else:
+            return f"{w}×{h}"
+
+    def _build_info_lines(self, filepath):
+        """构建预览区右上角的信息行，根据 _info_expanded 返回简洁或完整内容"""
         type_str = self._get_file_type_label(filepath)
         date_str = self._get_file_datetime(filepath)
-
-        # 判断日期来源，加注释
         ext = os.path.splitext(filepath)[1].lower()
+
+        # ── 日期来源标注 ──
         date_note = ""
         if date_str:
             basename = os.path.splitext(os.path.basename(filepath))[0]
-            # 检查是否从 EXIF 获取
             from_exif = False
             if ext in ('.jpg', '.jpeg', '.png', '.tiff', '.bmp'):
                 try:
@@ -1160,24 +1363,116 @@ class Phoo:
                 except Exception:
                     date_note = ""
 
-        # ── 读取 EXIF 扩展信息 ──
+        # ── 读取元数据 ──
         exif_info = self._get_exif_data(filepath)
+        video_info = self._get_video_info(filepath) if ext in self.vid_ext else {}
+
+        # ── 位置信息判断 ──
+        has_gps = ('GPS纬度' in exif_info and 'GPS经度' in exif_info)
+        location_str = "位置信息：有" if has_gps else "位置信息：无"
+
         lines = [type_str]
         if date_str:
-            lines.append(f"📅 {date_str} {date_note}".strip())
-        if '设备' in exif_info:
-            lines.append(f"📱 {exif_info['设备']}")
-        # 拍摄参数（光圈+快门+ISO 合并一行）
-        param_parts = []
-        for k in ('光圈', '快门', 'ISO'):
-            if k in exif_info:
-                param_parts.append(exif_info[k])
-        if param_parts:
-            lines.append("⚙️ " + " · ".join(param_parts))
-        # GPS 坐标
-        if 'GPS纬度' in exif_info and 'GPS经度' in exif_info:
-            lines.append(f"📍 {exif_info['GPS纬度']}, {exif_info['GPS经度']}")
+            lines.append(f"{self._shorten_date(date_str)} {date_note}".strip())
 
+        if not self._info_expanded:
+            # ── 简洁模式 ──
+            if ext in self.vid_ext and video_info:
+                # 视频：1080P|60fps|0:12:02
+                vid_parts = []
+                # 分辨率简写
+                try:
+                    cap = cv2.VideoCapture(filepath)
+                    if cap.isOpened():
+                        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                        vid_parts.append(self._resolution_label(w, h))
+                        cap.release()
+                except Exception:
+                    if '分辨率' in video_info:
+                        vid_parts.append(video_info['分辨率'])
+                if '帧率' in video_info:
+                    vid_parts.append(video_info['帧率'])
+                if '时长' in video_info:
+                    vid_parts.append(video_info['时长'])
+                if vid_parts:
+                    lines.append("|".join(vid_parts))
+            else:
+                # 图片：设备|f/1.8|1/120s|ISO80
+                img_parts = []
+                if '设备' in exif_info:
+                    img_parts.append(exif_info['设备'])
+                for k in ('光圈', '快门', 'ISO'):
+                    if k in exif_info:
+                        img_parts.append(exif_info[k])
+                if img_parts:
+                    lines.append("|".join(img_parts))
+
+            lines.append(location_str)
+            lines.append("[I] 展开 ▼")
+        else:
+            # ── 展开模式：全部元数据 ──
+            try:
+                size = os.path.getsize(filepath)
+                if size >= 1024 * 1024:
+                    lines.append(f"💾 大小: {size / 1024 / 1024:.1f} MB")
+                else:
+                    lines.append(f"💾 大小: {size / 1024:.1f} KB")
+            except Exception:
+                pass
+
+            if ext in self.img_ext:
+                try:
+                    img = Image.open(filepath)
+                    lines.append(f"📐 分辨率: {img.width} × {img.height}")
+                except Exception:
+                    pass
+
+            try:
+                ctime = datetime.datetime.fromtimestamp(os.path.getctime(filepath))
+                lines.append(f"📁 创建: {ctime.strftime('%Y-%m-%d %H:%M:%S')}")
+            except Exception:
+                pass
+            try:
+                mtime = datetime.datetime.fromtimestamp(os.path.getmtime(filepath))
+                lines.append(f"✏️ 修改: {mtime.strftime('%Y-%m-%d %H:%M:%S')}")
+            except Exception:
+                pass
+
+            # 图片 EXIF 详情
+            if exif_info:
+                lines.append("── 拍摄设备 ──")
+                for k in ('设备', '镜头', '软件'):
+                    if k in exif_info:
+                        lines.append(f"  {k}: {exif_info[k]}")
+                lines.append("── 拍摄参数 ──")
+                for k in ('光圈', '快门', 'ISO', '焦距', '等效焦距', '闪光灯'):
+                    if k in exif_info:
+                        lines.append(f"  {k}: {exif_info[k]}")
+                if has_gps:
+                    lines.append("── 位置信息 ──")
+                    for k in ('GPS纬度', 'GPS经度', 'GPS海拔'):
+                        if k in exif_info:
+                            lines.append(f"  {k}: {exif_info[k]}")
+                lines.append("── 图像属性 ──")
+                for k in ('方向', '色彩空间'):
+                    if k in exif_info:
+                        lines.append(f"  {k}: {exif_info[k]}")
+
+            # 视频详情
+            if video_info:
+                lines.append("── 视频信息 ──")
+                for k, v in video_info.items():
+                    lines.append(f"  {k}: {v}")
+
+            lines.append(location_str)
+            lines.append("[I] 收起 ▲")
+
+        return lines
+
+    def _update_info_label(self, filepath):
+        """更新预览区右上角的信息标签"""
+        lines = self._build_info_lines(filepath)
         self._info_label.config(text="\n".join(lines))
 
     def _show_video_thumbnail(self, filepath):
@@ -1220,212 +1515,20 @@ class Phoo:
         self.img_label.config(image=ph, text="")
         self.img_label.image = ph
 
-    def show_metadata_dialog(self):
-        """按 I 键弹出完整元数据详情窗口"""
-        if not self.all_images:
-            return
-        filepath = self.all_images[self.ptr]
-
-        dlg = Toplevel(self.root)
-        dlg.title("文件元数据")
-        dlg.configure(bg=COLOR_BG)
-        dlg.resizable(True, True)
-
-        # ── 收集所有元数据 ──
-        sections = []  # [(section_name, [(key, value), ...])]
-
-        # 基本信息
-        basic = []
-        basic.append(("文件名", os.path.basename(filepath)))
-        basic.append(("路径", os.path.dirname(filepath)))
-        try:
-            size = os.path.getsize(filepath)
-            if size >= 1024 * 1024:
-                basic.append(("文件大小", f"{size / 1024 / 1024:.1f} MB"))
-            else:
-                basic.append(("文件大小", f"{size / 1024:.1f} KB"))
-        except Exception:
-            pass
-        basic.append(("文件类型", self._get_file_type_label(filepath)))
-        ext = os.path.splitext(filepath)[1].lower()
-        if ext in self.img_ext:
-            try:
-                img = Image.open(filepath)
-                basic.append(("分辨率", f"{img.width} × {img.height}"))
-            except Exception:
-                pass
-        sections.append(("基本信息", basic))
-
-        # 拍摄时间
-        time_info = []
-        date_str = self._get_file_datetime(filepath)
-        if date_str:
-            time_info.append(("拍摄日期", date_str))
-        # 文件系统时间
-        try:
-            ctime = datetime.datetime.fromtimestamp(os.path.getctime(filepath))
-            time_info.append(("创建时间", ctime.strftime("%Y-%m-%d %H:%M:%S")))
-        except Exception:
-            pass
-        try:
-            mtime = datetime.datetime.fromtimestamp(os.path.getmtime(filepath))
-            time_info.append(("修改时间", mtime.strftime("%Y-%m-%d %H:%M:%S")))
-        except Exception:
-            pass
-        if time_info:
-            sections.append(("时间信息", time_info))
-
-        # EXIF 信息（图片）
-        if ext in ('.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp'):
-            exif_data = self._get_exif_data(filepath)
-
-            # 拍摄设备
-            device_info = []
-            for k in ('设备', '镜头', '软件'):
-                if k in exif_data:
-                    device_info.append((k, exif_data[k]))
-            if device_info:
-                sections.append(("拍摄设备", device_info))
-
-            # 拍摄参数
-            param_info = []
-            for k in ('光圈', '快门', 'ISO', '焦距', '等效焦距', '闪光灯'):
-                if k in exif_data:
-                    param_info.append((k, exif_data[k]))
-            if param_info:
-                sections.append(("拍摄参数", param_info))
-
-            # GPS
-            gps_info = []
-            for k in ('GPS纬度', 'GPS经度', 'GPS海拔'):
-                if k in exif_data:
-                    gps_info.append((k, exif_data[k]))
-            if gps_info:
-                sections.append(("位置信息", gps_info))
-
-            # 图像属性
-            img_info = []
-            for k in ('分辨率', '方向', '色彩空间'):
-                if k in exif_data:
-                    img_info.append((k, exif_data[k]))
-            if img_info:
-                sections.append(("图像属性", img_info))
-
-        # 视频信息
-        elif ext in self.vid_ext and HAS_CV2:
-            video_info = []
-            try:
-                cap = cv2.VideoCapture(filepath)
-                if cap.isOpened():
-                    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                    fps = cap.get(cv2.CAP_PROP_FPS)
-                    frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                    video_info.append(("分辨率", f"{w} × {h}"))
-                    if fps > 0:
-                        video_info.append(("帧率", f"{fps:.1f} fps"))
-                    if frames > 0 and fps > 0:
-                        duration = frames / fps
-                        mins = int(duration // 60)
-                        secs = duration % 60
-                        video_info.append(("时长", f"{mins}:{secs:05.2f}"))
-                        video_info.append(("总帧数", str(frames)))
-                    cap.release()
-            except Exception:
-                pass
-            if video_info:
-                sections.append(("视频信息", video_info))
-
-        # ── 构建 UI ──
-        # 标题
-        title_lbl = Label(dlg, text=f"📄 {os.path.basename(filepath)}",
-                         font=FONT_TITLE, bg=COLOR_BG, anchor='w')
-        title_lbl.pack(fill=X, padx=16, pady=(12, 4))
-
-        # 滚动区域
-        container = Frame(dlg, bg=COLOR_BG)
-        container.pack(fill=BOTH, expand=True, padx=16, pady=4)
-
-        canvas = Canvas(container, bg=COLOR_BG, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(container, orient=VERTICAL, command=canvas.yview)
-        scroll_frame = Frame(canvas, bg=COLOR_BG)
-
-        scroll_frame.bind("<Configure>",
-                          lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        canvas.pack(side=LEFT, fill=BOTH, expand=True)
-        scrollbar.pack(side=RIGHT, fill=Y)
-
-        # 鼠标滚轮支持
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
-        dlg.bind("<MouseWheel>", _on_mousewheel)
-
-        # 填充分区内容
-        for section_name, items in sections:
-            # 分区标题
-            sec_lbl = Label(scroll_frame, text=f"【{section_name}】",
-                           font=FONT_BOLD, bg=COLOR_BG, fg='#2c3e50',
-                           anchor='w')
-            sec_lbl.pack(fill=X, pady=(8, 2))
-
-            # 分隔线
-            sep = Frame(scroll_frame, height=1, bg=COLOR_BORDER)
-            sep.pack(fill=X, pady=(0, 4))
-
-            for key, value in items:
-                row = Frame(scroll_frame, bg=COLOR_BG)
-                row.pack(fill=X, pady=1)
-
-                key_lbl = Label(row, text=f"  {key}：", font=FONT_NORMAL,
-                               bg=COLOR_BG, fg='#555', width=10, anchor='e')
-                key_lbl.pack(side=LEFT)
-
-                val_lbl = Label(row, text=str(value), font=FONT_NORMAL,
-                               bg=COLOR_BG, fg='#222', anchor='w')
-                val_lbl.pack(side=LEFT, fill=X, expand=True, padx=(4, 0))
-
-        # 关闭按钮
-        btn_frm = Frame(dlg, bg=COLOR_BG)
-        btn_frm.pack(fill=X, padx=16, pady=(8, 12))
-        Button(btn_frm, text=" 关闭 ", command=dlg.destroy,
-               bg=COLOR_BTN_ALT, fg=COLOR_BTN_FG, font=FONT_BOLD,
-               padx=16, pady=4, bd=0, cursor='hand2').pack(side=RIGHT)
-
-        # Esc 关闭
-        dlg.bind('<Escape>', lambda e: dlg.destroy())
-
-        # 窗口大小 & 位置
-        dlg.geometry("520x500")
-        dlg.transient(self.root)
-        dlg.grab_set()
-
-        # 解绑鼠标滚轮（关闭时）
-        def _on_close():
-            try:
-                canvas.unbind_all("<MouseWheel>")
-            except Exception:
-                pass
-            dlg.destroy()
-        dlg.protocol("WM_DELETE_WINDOW", _on_close)
-
     def update_status_bar(self):
+        """更新状态栏：统计待应用操作数，并刷新应用按钮"""
         if self.all_images:
             cur = os.path.basename(self.all_images[self.ptr])
             mode = "复制" if self.copy_mode.get() else "移动"
-            total_orig = self.ptr + len(self.all_images) - self.ptr  # 当前队列
-            # 已处理数 = 历史操作数（不含撤销）
-            done = len(self.history)
+            # 已规划操作数
+            done = len(self.pending_actions)
             remaining = len(self.all_images)
             total_session = done + remaining
             pct = (done / total_session * 100) if total_session > 0 else 0
 
             self.status.config(
                 text=(f"  {self.ptr + 1}/{remaining} 待分类  ·  "
-                      f"本次已分类 {done} 张  ·  {cur}    [{mode}模式]"),
+                      f"本次已规划 {done} 项  ·  {cur}    [{mode}模式]"),
                 fg='black')
             self._progress_var.set(pct)
             self._progress_label.config(
@@ -1435,14 +1538,37 @@ class Phoo:
             self._progress_var.set(0)
             self._progress_label.config(text="")
 
+        # 刷新应用按钮状态
+        n = len(self.pending_actions)
+        if n > 0:
+            self._apply_btn.config(
+                text=f"应用 ({n})",
+                state=NORMAL,
+                bg='#4CAF50', fg='white'
+            )
+        else:
+            self._apply_btn.config(
+                text="已应用",
+                state=DISABLED,
+                bg='SystemButtonFace', fg='gray'
+            )
+
         # 刷新每个输出文件夹的照片计数
         self._refresh_folder_counts()
 
     def _refresh_folder_counts(self):
-        """刷新输出文件夹旁的照片计数标签"""
+        """刷新输出文件夹旁的照片计数标签（含 pending 预估）"""
         if not hasattr(self, '_folder_count_labels'):
             return
         n = self.folder_count_var.get()
+
+        # 统计 pending 中目标为各文件夹的操作数
+        pending_counts = {}
+        for act in self.pending_actions:
+            if act['dst']:
+                folder = os.path.dirname(act['dst'])
+                pending_counts[folder] = pending_counts.get(folder, 0) + 1
+
         for i, lbl in enumerate(self._folder_count_labels):
             if i >= n:
                 lbl.config(text="")
@@ -1455,6 +1581,8 @@ class Phoo:
                         if f.lower().endswith(self.supported_formats)
                         and os.path.isfile(os.path.join(path, f))
                     )
+                    # 加上 pending 预估数
+                    cnt += pending_counts.get(path, 0)
                     lbl.config(text=f"📁{cnt}张" if cnt > 0 else "📂空")
                 except Exception:
                     lbl.config(text="")
@@ -1462,7 +1590,17 @@ class Phoo:
                 lbl.config(text="")
 
     def _on_close(self):
-        """窗口关闭时保存配置（含进度）并退出"""
+        """窗口关闭时检查待应用操作，确认后保存配置并退出"""
+        if self.pending_actions:
+            count = len(self.pending_actions)
+            classify_n = sum(1 for a in self.pending_actions if a['action'] != 'delete')
+            delete_n = sum(1 for a in self.pending_actions if a['action'] == 'delete')
+            msg = (f"还有 {count} 项未应用的操作（"
+                   f"{classify_n} 项分类、{delete_n} 项删除）\n\n"
+                   f"关闭窗口将丢弃所有未应用的操作，确定要关闭吗？")
+            ok = messagebox.askyesno("未应用的操作", msg, parent=self.root)
+            if not ok:
+                return
         self.save_config()
         self.root.destroy()
 
@@ -1473,23 +1611,16 @@ class Phoo:
         self.update_display()
 
     def delete_current(self):
-        """删除当前图片（直接删除，二次确认）"""
+        """将当前文件记录到待删除队列（不立即删除）"""
         if not self.all_images: return
         src = self.all_images[self.ptr]
-        ok = messagebox.askyesno(
-            "确认删除",
-            f"确定要删除这张图片吗？\n\n{os.path.basename(src)}\n\n此操作不可撤销！",
-            parent=self.root
-        )
-        if not ok: return
-        try:
-            os.remove(src)
-            self.all_images.pop(self.ptr)
-            if self.all_images:
-                self.ptr = self.ptr % len(self.all_images)
-            self.update_display()
-        except Exception as e:
-            messagebox.showerror("错误", f"删除失败：{e}")
+        self.pending_actions.append({
+            'action': 'delete', 'src': src, 'dst': None, 'idx': self.ptr
+        })
+        self.all_images.pop(self.ptr)
+        if self.all_images:
+            self.ptr = self.ptr % len(self.all_images)
+        self.update_display()
 
     def go_back(self):
         if not self.all_images: return
@@ -1497,6 +1628,7 @@ class Phoo:
         self.update_display()
 
     def move_to(self, idx):
+        """将当前文件记录到待应用队列（不立即执行）"""
         n = self.folder_count_var.get()
         if not self.all_images or idx >= n: return
         fo = self.output_folders[idx]["path"].get()
@@ -1514,37 +1646,57 @@ class Phoo:
             dst = os.path.join(fo, f"{base}_{c}{ext}")
             c += 1
 
-        try:
-            if self.copy_mode.get():
-                shutil.copy2(src, dst)
-            else:
-                shutil.move(src, dst)
-            self.history.append({
-                'src': dst,
-                'dst': src,
-                'idx': self.ptr,
-                'copy': self.copy_mode.get()
-            })
-            self.all_images.pop(self.ptr)
-            if self.all_images:
-                self.ptr = self.ptr % len(self.all_images)
-            self.update_display()
-        except Exception as e:
-            messagebox.showerror("错误", f"操作失败：{e}")
+        # 记录到待应用队列，不立即执行
+        action = 'copy' if self.copy_mode.get() else 'move'
+        self.pending_actions.append({
+            'action': action, 'src': src, 'dst': dst, 'idx': self.ptr
+        })
+        self.all_images.pop(self.ptr)
+        if self.all_images:
+            self.ptr = self.ptr % len(self.all_images)
+        self.update_display()
 
     def undo(self):
-        if not self.history: return
-        act = self.history.pop()
-        try:
-            if act['copy']:
-                os.remove(act['src'])
-            else:
-                shutil.move(act['src'], act['dst'])
-            self.all_images.insert(act['idx'], act['dst'])
-            self.ptr = act['idx']
-            self.update_display()
-        except Exception as e:
-            messagebox.showerror("错误", f"撤销失败：{e}")
+        """从待应用队列撤回最近一条操作，文件回到列表"""
+        if not self.pending_actions: return
+        act = self.pending_actions.pop()
+        # 文件本身未被移动/删除，src 就是原始路径
+        self.all_images.insert(act['idx'], act['src'])
+        self.ptr = act['idx']
+        self.update_display()
+
+    def apply_pending(self):
+        """批量执行所有待应用操作"""
+        if not self.pending_actions:
+            messagebox.showinfo("提示", "没有待应用的操作")
+            return
+
+        success = 0
+        failed = 0
+        errors = []
+        for act in list(self.pending_actions):
+            try:
+                if act['action'] == 'copy':
+                    shutil.copy2(act['src'], act['dst'])
+                elif act['action'] == 'move':
+                    shutil.move(act['src'], act['dst'])
+                elif act['action'] == 'delete':
+                    os.remove(act['src'])
+                success += 1
+            except Exception as e:
+                failed += 1
+                errors.append(f"{os.path.basename(act['src'])}：{e}")
+
+        self.pending_actions.clear()
+        self.update_display()
+
+        if failed == 0:
+            self._flash_status(f"✅ 已成功应用 {success} 项操作")
+        else:
+            messagebox.showwarning(
+                "部分失败",
+                f"成功：{success}，失败：{failed}\n\n" + "\n".join(errors[:10])
+            )
 
     # ──────────────────────────────────────────────
     #  配置 保存/读取
