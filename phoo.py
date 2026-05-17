@@ -124,20 +124,41 @@ FONT_BOLD      = ('Microsoft YaHei', 11, 'bold')
 FONT_SMALL     = ('Microsoft YaHei', 10)
 FONT_TITLE     = ('Microsoft YaHei', 13, 'bold')
 FONT_WELCOME  = ('Microsoft YaHei', 12)
-COLOR_BG       = '#f0f2f5'
-COLOR_BTN      = '#4a90d9'
-COLOR_BTN_FG   = 'white'
-COLOR_BTN_ALT  = '#6c757d'
-COLOR_ACCENT   = '#e8edf3'
-COLOR_BORDER   = '#c0c4cc'
-COLOR_STATUS_BG = '#e8e8e8'
+
+# 配色体系
+COLOR_BG       = '#f7f8fa'       # 主背景
+COLOR_CARD     = '#ffffff'       # 卡片/面板背景
+COLOR_BORDER   = '#e5e7eb'       # 柔和边框
+COLOR_BTN      = '#3b82f6'       # 主色按钮
+COLOR_BTN_FG   = '#ffffff'       # 按钮文字
+COLOR_BTN_ALT  = '#6b7280'       # 次要按钮
+COLOR_ACCENT   = '#e8edf3'       # 选中底色
+COLOR_SUCCESS  = '#10b981'       # 成功色
+COLOR_DANGER   = '#ef4444'       # 危险色
+COLOR_WARNING  = '#f59e0b'       # 警告色
+COLOR_STATUS_BG = '#ffffff'      # 状态栏底色
+COLOR_TEXT     = '#1f2937'       # 文字主色
+COLOR_TEXT_SEC = '#6b7280'       # 文字次色
+COLOR_TEXT_WEAK = '#9ca3af'      # 文字弱色/提示
+
+# 间距系统（4px 基准）
+SPACE_XS = 4
+SPACE_SM = 8
+SPACE_MD = 12
+SPACE_LG = 16
+
+
+def _bind_hover(widget, bg, hover_bg):
+    """通用按钮 hover 效果"""
+    widget.bind('<Enter>', lambda e: widget.config(bg=hover_bg))
+    widget.bind('<Leave>', lambda e: widget.config(bg=bg))
 
 
 class HintEntry(Entry):
     def __init__(self, master, hint='', **kw):
         super().__init__(master, **kw)
         self.hint = hint
-        self.hint_color = 'grey'
+        self.hint_color = '#9ca3af'
         self.normal_color = self['fg']
         self.bind('<FocusIn>',  self._clear_hint)
         self.bind('<FocusOut>', self._show_hint)
@@ -165,18 +186,19 @@ class CreateFolderDialog(Toplevel):
         super().__init__(parent)
         self.title("新建分类文件夹")
         self.resizable(False, False)
-        self.configure(bg=COLOR_BG)
+        self.configure(bg=COLOR_CARD)
         self.result_path = None
         self._base_dir = base_dir
 
         Label(self, text="在以下位置创建新文件夹：",
-              font=FONT_BOLD, bg=COLOR_BG).pack(padx=20, pady=(14, 2), anchor='w')
+              font=FONT_BOLD, bg=COLOR_CARD, fg=COLOR_TEXT).pack(padx=20, pady=(14, 2), anchor='w')
         Label(self, text=base_dir,
-              font=FONT_SMALL, fg=COLOR_BTN_ALT, bg=COLOR_BG).pack(padx=20, anchor='w')
+              font=FONT_SMALL, fg=COLOR_TEXT_SEC, bg=COLOR_CARD).pack(padx=20, anchor='w')
 
-        name_frm = Frame(self, bg=COLOR_BG)
+        name_frm = Frame(self, bg=COLOR_CARD)
         name_frm.pack(padx=20, pady=(10, 2), fill='x')
-        Label(name_frm, text="文件夹名称：", font=FONT_BOLD, bg=COLOR_BG).pack(side=LEFT)
+        Label(name_frm, text="文件夹名称：", font=FONT_BOLD, bg=COLOR_CARD,
+              fg=COLOR_TEXT).pack(side=LEFT)
         self._entry = Entry(name_frm, font=FONT_BOLD, width=20,
                             bd=1, relief=SUNKEN)
         self._entry.pack(side=LEFT, padx=4)
@@ -184,17 +206,21 @@ class CreateFolderDialog(Toplevel):
         self._entry.select_range(0, END)
 
         self._hint_label = Label(self, text="", font=FONT_SMALL,
-                                 fg='#52b788', bg=COLOR_BG)
+                                 fg=COLOR_SUCCESS, bg=COLOR_CARD)
         self._hint_label.pack(padx=20, pady=(2, 0), anchor='w')
 
-        btn_frm = Frame(self, bg=COLOR_BG)
+        btn_frm = Frame(self, bg=COLOR_CARD)
         btn_frm.pack(padx=20, pady=12)
-        Button(btn_frm, text=" 创建 ", command=self._ok,
-               bg='#52b788', fg='white', font=FONT_BOLD,
-               padx=14, pady=4, bd=0, cursor='hand2').pack(side=LEFT, padx=6)
-        Button(btn_frm, text=" 取消 ", command=self.destroy,
+        btn_ok = Button(btn_frm, text=" 创建 ", command=self._ok,
+               bg=COLOR_SUCCESS, fg='white', font=FONT_BOLD,
+               padx=14, pady=4, bd=0, cursor='hand2')
+        btn_ok.pack(side=LEFT, padx=6)
+        _bind_hover(btn_ok, COLOR_SUCCESS, '#059669')
+        btn_cancel = Button(btn_frm, text=" 取消 ", command=self.destroy,
                bg=COLOR_BTN_ALT, fg='white', font=FONT_BOLD,
-               padx=14, pady=4, bd=0, cursor='hand2').pack(side=LEFT, padx=6)
+               padx=14, pady=4, bd=0, cursor='hand2')
+        btn_cancel.pack(side=LEFT, padx=6)
+        _bind_hover(btn_cancel, COLOR_BTN_ALT, '#4b5563')
 
         # 绑定回车 → 创建
         self._entry.bind('<Return>', lambda e: self._ok())
@@ -213,18 +239,18 @@ class CreateFolderDialog(Toplevel):
     def _update_hint(self):
         name = self._entry.get().strip()
         if not name:
-            self._hint_label.config(text="请输入文件夹名称", fg='#aaa')
+            self._hint_label.config(text="请输入文件夹名称", fg=COLOR_TEXT_WEAK)
             return
         full = os.path.join(self._base_dir, name)
         if os.path.exists(full):
-            self._hint_label.config(text="该文件夹已存在，创建后将合并内容", fg='#e67e22')
+            self._hint_label.config(text="该文件夹已存在，创建后将合并内容", fg=COLOR_WARNING)
         else:
-            self._hint_label.config(text=f"将创建：{full}", fg='#52b788')
+            self._hint_label.config(text=f"将创建：{full}", fg=COLOR_SUCCESS)
 
     def _ok(self):
         name = self._entry.get().strip()
         if not name:
-            self._hint_label.config(text="文件夹名称不能为空！", fg='#e74c3c')
+            self._hint_label.config(text="文件夹名称不能为空！", fg=COLOR_DANGER)
             self._entry.focus_set()
             return
         full = os.path.join(self._base_dir, name)
@@ -243,21 +269,25 @@ class KeybindDialog(Toplevel):
         self.title("自定义快捷键")
         self.resizable(False, False)
         self.grab_set()
-        self.configure(bg=COLOR_BG)
+        self.configure(bg=COLOR_CARD)
         self.result_keys = list(keys)
         self.folder_count = folder_count
         self.entries = []
 
         Label(self, text="设置各文件夹快捷键（单个字母/数字）",
-              font=FONT_BOLD, bg=COLOR_BG).grid(
+              font=FONT_BOLD, bg=COLOR_CARD, fg=COLOR_TEXT).grid(
                   row=0, column=0, columnspan=3, padx=20, pady=(14, 8))
 
-        Label(self, text="文件夹", font=FONT_BOLD, bg=COLOR_BG).grid(row=1, column=0, padx=10)
-        Label(self, text="快捷键", font=FONT_BOLD, bg=COLOR_BG).grid(row=1, column=1, padx=10)
-        Label(self, text="说明",   font=FONT_BOLD, bg=COLOR_BG).grid(row=1, column=2, padx=10)
+        Label(self, text="文件夹", font=FONT_BOLD, bg=COLOR_CARD,
+              fg=COLOR_TEXT).grid(row=1, column=0, padx=10)
+        Label(self, text="快捷键", font=FONT_BOLD, bg=COLOR_CARD,
+              fg=COLOR_TEXT).grid(row=1, column=1, padx=10)
+        Label(self, text="说明",   font=FONT_BOLD, bg=COLOR_CARD,
+              fg=COLOR_TEXT).grid(row=1, column=2, padx=10)
 
         for i in range(folder_count):
-            Label(self, text=f"文件夹 {i+1}", font=FONT_NORMAL, bg=COLOR_BG).grid(
+            Label(self, text=f"文件夹 {i+1}", font=FONT_NORMAL, bg=COLOR_CARD,
+                  fg=COLOR_TEXT).grid(
                 row=i+2, column=0, padx=10, pady=4)
             var = StringVar(value=keys[i])
             e = Entry(self, textvariable=var, width=4,
@@ -266,30 +296,36 @@ class KeybindDialog(Toplevel):
             e.grid(row=i+2, column=1, padx=10, pady=4)
             self.entries.append(var)
             Label(self, text="（单字符）", font=FONT_SMALL,
-                  fg=COLOR_BTN_ALT, bg=COLOR_BG).grid(
+                  fg=COLOR_TEXT_WEAK, bg=COLOR_CARD).grid(
                       row=i+2, column=2, padx=10)
 
         note = (f"保留键：W=跳过  Del=删除  I=元数据  Ctrl+Z=撤销  Tab=切换模式\n"
                 "请勿将上述键设为分类快捷键")
         Label(self, text=note, font=FONT_SMALL,
-              fg=COLOR_BTN_ALT, bg=COLOR_BG).grid(
+              fg=COLOR_TEXT_WEAK, bg=COLOR_CARD).grid(
                   row=folder_count+2, column=0, columnspan=3,
                   padx=16, pady=(8, 4))
 
-        btn_frm = Frame(self, bg=COLOR_BG)
+        btn_frm = Frame(self, bg=COLOR_CARD)
         btn_frm.grid(row=folder_count+3, column=0, columnspan=3, pady=12)
-        Button(btn_frm, text=" 确定 ", command=self._ok,
+        btn_ok = Button(btn_frm, text=" 确定 ", command=self._ok,
                bg=COLOR_BTN, fg=COLOR_BTN_FG,
                font=FONT_BOLD, padx=12, pady=4,
-               bd=0, cursor='hand2').pack(side=LEFT, padx=6)
-        Button(btn_frm, text=" 取消 ", command=self.destroy,
+               bd=0, cursor='hand2')
+        btn_ok.pack(side=LEFT, padx=6)
+        _bind_hover(btn_ok, COLOR_BTN, '#2563eb')
+        btn_cancel = Button(btn_frm, text=" 取消 ", command=self.destroy,
                bg=COLOR_BTN_ALT, fg=COLOR_BTN_FG,
                font=FONT_BOLD, padx=12, pady=4,
-               bd=0, cursor='hand2').pack(side=LEFT, padx=6)
-        Button(btn_frm, text=" 重置默认 ", command=self._reset,
-               bg='#e0e0e0', fg='black',
+               bd=0, cursor='hand2')
+        btn_cancel.pack(side=LEFT, padx=6)
+        _bind_hover(btn_cancel, COLOR_BTN_ALT, '#4b5563')
+        btn_reset = Button(btn_frm, text=" 重置默认 ", command=self._reset,
+               bg='#e5e7eb', fg=COLOR_TEXT,
                font=FONT_NORMAL, padx=12, pady=4,
-               bd=0, cursor='hand2').pack(side=LEFT, padx=6)
+               bd=0, cursor='hand2')
+        btn_reset.pack(side=LEFT, padx=6)
+        _bind_hover(btn_reset, '#e5e7eb', '#d1d5db')
 
         self.wait_window()
 
@@ -353,12 +389,12 @@ class Phoo:
         self.default_font.configure(size=11)
         self.root.option_add("*Font", self.default_font)
         self.root.configure(bg=COLOR_BG)
-        # ttk 样式（Combobox 等控件不受 option_add 影响）
+        # ttk 样式（Combobox 等）
         self._ttk_style = ttk.Style()
         self._ttk_style.configure('TCombobox', font=FONT_NORMAL)
         self._ttk_style.map('TCombobox',
             fieldbackground=[('readonly', 'white')],
-            selectbackground=[('readonly', '#cce5ff')])
+            selectbackground=[('readonly', '#dbeafe')])
 
         self.config_file = "phoo_config.json"
 
@@ -410,109 +446,129 @@ class Phoo:
     #  UI 构建
     # ──────────────────────────────────────────────
     def build_ui(self):
+        # ── 工具栏卡片 ──
+        toolbar_card = Frame(self.root, bg=COLOR_CARD,
+                             highlightbackground=COLOR_BORDER,
+                             highlightthickness=1)
+        toolbar_card.pack(fill=X, padx=SPACE_LG, pady=(SPACE_MD, SPACE_XS))
+
         # ── 第一行：输入路径 ──
-        line1 = Frame(self.root, bg=COLOR_BG)
-        line1.pack(fill=X, padx=10, pady=(8,3))
-        Label(line1, text="输入路径：", bg=COLOR_BG, font=FONT_BOLD).pack(side=LEFT)
+        line1 = Frame(toolbar_card, bg=COLOR_CARD)
+        line1.pack(fill=X, padx=SPACE_SM, pady=(SPACE_SM, SPACE_XS))
+        Label(line1, text="输入路径：", bg=COLOR_CARD, font=FONT_BOLD,
+              fg=COLOR_TEXT).pack(side=LEFT)
         self.input_entry = HintEntry(line1, textvariable=self.input_folder,
                                      hint='这里是需要处理的文件夹路径', state='readonly')
-        self.input_entry.pack(side=LEFT, fill=X, expand=True, padx=5)
-        Button(line1, text="浏览…", command=self.browse_input,
+        self.input_entry.pack(side=LEFT, fill=X, expand=True, padx=SPACE_XS)
+        btn_browse = Button(line1, text="浏览…", command=self.browse_input,
                bg=COLOR_BTN, fg=COLOR_BTN_FG, font=FONT_BOLD,
-               padx=10, pady=3, bd=0, cursor='hand2').pack(side=LEFT, padx=5)
+               padx=10, pady=3, bd=0, cursor='hand2')
+        btn_browse.pack(side=LEFT, padx=SPACE_XS)
+        _bind_hover(btn_browse, COLOR_BTN, '#2563eb')
         Checkbutton(line1, text="包含子文件夹", variable=self.inc_subfolders,
-                    command=self.load_images, bg=COLOR_BG,
-                    activebackground=COLOR_BG).pack(side=LEFT, padx=5)
+                    command=self.load_images, bg=COLOR_CARD,
+                    activebackground=COLOR_CARD,
+                    fg=COLOR_TEXT, selectcolor=COLOR_ACCENT,
+                    font=FONT_SMALL).pack(side=LEFT, padx=SPACE_XS)
+
+        # 分隔线
+        Frame(toolbar_card, height=1, bg=COLOR_BORDER).pack(fill=X, padx=SPACE_SM)
 
         # ── 第二行：排序 + 缩放 + 复制/移动 + 撤销 ──
-        line2 = Frame(self.root, bg=COLOR_BG)
-        line2.pack(fill=X, padx=10, pady=(2,4))
+        line2 = Frame(toolbar_card, bg=COLOR_CARD)
+        line2.pack(fill=X, padx=SPACE_SM, pady=SPACE_XS)
 
-        Label(line2, text="排序：", bg=COLOR_BG, font=FONT_BOLD).pack(side=LEFT, padx=(6,0))
-        sort_frm = Frame(line2, bg=COLOR_BG)
+        Label(line2, text="排序：", bg=COLOR_CARD, font=FONT_BOLD,
+              fg=COLOR_TEXT).pack(side=LEFT)
+        sort_frm = Frame(line2, bg=COLOR_CARD)
         sort_frm.pack(side=LEFT)
         for txt, val in [("时间↑","time"), ("大小↑","size"), ("名称↑","name")]:
             Radiobutton(sort_frm, text=txt, variable=self.sort_method,
                        value=val, command=self.load_images,
-                       bg=COLOR_BG, activebackground=COLOR_BG,
+                       bg=COLOR_CARD, activebackground=COLOR_CARD,
+                       fg=COLOR_TEXT, selectcolor=COLOR_ACCENT,
                        font=FONT_SMALL).pack(side=LEFT, padx=3)
         Checkbutton(sort_frm, text="倒序", variable=self.reverse_sort,
                    command=self.load_images,
-                   bg=COLOR_BG, activebackground=COLOR_BG,
-                   font=FONT_SMALL).pack(side=LEFT, padx=8)
+                   bg=COLOR_CARD, activebackground=COLOR_CARD,
+                   fg=COLOR_TEXT, selectcolor=COLOR_ACCENT,
+                   font=FONT_SMALL).pack(side=LEFT, padx=SPACE_SM)
 
-        sep2 = Frame(line2, width=1, bg=COLOR_BORDER)
-        sep2.pack(side=LEFT, fill=Y, padx=8, pady=4)
-        
-        Frame(line2, bg=COLOR_BG).pack(side=LEFT, fill=X, expand=True)
-        
-        Label(line2, text="缩放：", bg=COLOR_BG, font=FONT_BOLD).pack(side=LEFT)
-        scale_frame = Frame(line2, bg=COLOR_BG)
-        scale_frame.pack(side=LEFT, padx=2)
+        Frame(line2, bg=COLOR_CARD).pack(side=LEFT, fill=X, expand=True)
+
+        Label(line2, text="缩放：", bg=COLOR_CARD, font=FONT_BOLD,
+              fg=COLOR_TEXT).pack(side=LEFT)
+        scale_frame = Frame(line2, bg=COLOR_CARD)
+        scale_frame.pack(side=LEFT, padx=SPACE_XS)
         ttk.Combobox(scale_frame, textvariable=self.scale_mode,
                     values=["完整", "填充", "原始"],
                     state="readonly", width=5).pack(side=LEFT)
         self.scale_mode.trace_add('write', self.on_display_option_change)
-        
+
         Checkbutton(line2, text="小图不放大", variable=self.dont_enlarge,
                    command=self.on_display_option_change,
-                   bg=COLOR_BG, activebackground=COLOR_BG,
-                   font=FONT_SMALL).pack(side=LEFT, padx=6)
-        
-        sep = Frame(line2, width=1, bg=COLOR_BORDER)
-        sep.pack(side=LEFT, fill=Y, padx=8, pady=4)
-        
-        mode_frm = Frame(line2, bg=COLOR_BG)
-        mode_frm.pack(side=LEFT)
-        Radiobutton(mode_frm, text="复制", variable=self.copy_mode, value=True,
-                    bg=COLOR_BG, activebackground=COLOR_BG,
-                    font=FONT_SMALL, selectcolor=COLOR_ACCENT).pack(side=LEFT)
-        Radiobutton(mode_frm, text="移动", variable=self.copy_mode, value=False,
-                    bg=COLOR_BG, activebackground=COLOR_BG,
-                    font=FONT_SMALL, selectcolor=COLOR_ACCENT).pack(side=LEFT)
-        Label(mode_frm, text="(Tab切换)", font=FONT_SMALL, fg=COLOR_BTN_ALT,
-              bg=COLOR_BG).pack(side=LEFT, padx=(4,0))
+                   bg=COLOR_CARD, activebackground=COLOR_CARD,
+                   fg=COLOR_TEXT, selectcolor=COLOR_ACCENT,
+                   font=FONT_SMALL).pack(side=LEFT, padx=SPACE_XS)
 
-        sep_undo = Frame(line2, width=1, bg=COLOR_BORDER)
-        sep_undo.pack(side=LEFT, fill=Y, padx=8, pady=4)
-        
-        Button(line2, text="↩ 撤销", command=self.undo,
+        # 复制/移动 + 撤销（右侧）
+        mode_frm = Frame(line2, bg=COLOR_CARD)
+        mode_frm.pack(side=RIGHT)
+        Radiobutton(mode_frm, text="复制", variable=self.copy_mode, value=True,
+                    bg=COLOR_CARD, activebackground=COLOR_CARD,
+                    fg=COLOR_TEXT, selectcolor=COLOR_ACCENT,
+                    font=FONT_SMALL).pack(side=LEFT)
+        Radiobutton(mode_frm, text="移动", variable=self.copy_mode, value=False,
+                    bg=COLOR_CARD, activebackground=COLOR_CARD,
+                    fg=COLOR_TEXT, selectcolor=COLOR_ACCENT,
+                    font=FONT_SMALL).pack(side=LEFT)
+        Label(mode_frm, text="(Tab)", font=FONT_SMALL, fg=COLOR_TEXT_WEAK,
+              bg=COLOR_CARD).pack(side=LEFT, padx=(SPACE_XS, 0))
+        btn_undo = Button(mode_frm, text="↩ 撤销", command=self.undo,
                bg=COLOR_BTN_ALT, fg=COLOR_BTN_FG, font=FONT_BOLD,
-               padx=10, pady=3, bd=0, cursor='hand2').pack(side=LEFT, padx=5)
+               padx=10, pady=3, bd=0, cursor='hand2')
+        btn_undo.pack(side=LEFT, padx=(SPACE_MD, 0))
+        _bind_hover(btn_undo, COLOR_BTN_ALT, '#4b5563')
+
+        # 分隔线
+        Frame(toolbar_card, height=1, bg=COLOR_BORDER).pack(fill=X, padx=SPACE_SM)
 
         # ── 第三行：文件夹数量 + 自定义快捷键 ──
-        line3 = Frame(self.root, bg=COLOR_BG)
-        line3.pack(fill=X, padx=10, pady=(2,4))
+        line3 = Frame(toolbar_card, bg=COLOR_CARD)
+        line3.pack(fill=X, padx=SPACE_SM, pady=(SPACE_XS, SPACE_SM))
 
-        Label(line3, text="分类文件夹：", bg=COLOR_BG, font=FONT_BOLD).pack(side=LEFT)
+        Label(line3, text="分类文件夹：", bg=COLOR_CARD, font=FONT_BOLD,
+              fg=COLOR_TEXT).pack(side=LEFT)
         self._count_spinbox = Spinbox(
             line3, from_=2, to=MAX_FOLDERS,
             textvariable=self.folder_count_var,
             width=4, state='readonly',
             font=FONT_BOLD,
             command=self._on_folder_count_change)
-        self._count_spinbox.pack(side=LEFT, padx=(0, 12))
+        self._count_spinbox.pack(side=LEFT, padx=(0, SPACE_MD))
 
-        Button(line3, text="⌨ 自定义快捷键",
+        btn_keys = Button(line3, text="⌨ 自定义快捷键",
                command=self._open_keybind_dialog,
                bg=COLOR_BTN_ALT, fg=COLOR_BTN_FG, font=FONT_BOLD,
-               padx=10, pady=3, bd=0, cursor='hand2').pack(side=LEFT, padx=5)
+               padx=10, pady=3, bd=0, cursor='hand2')
+        btn_keys.pack(side=LEFT, padx=SPACE_XS)
+        _bind_hover(btn_keys, COLOR_BTN_ALT, '#4b5563')
 
         # 快捷键预览标签（动态更新）
         self._key_preview_var = StringVar()
         Label(line3, textvariable=self._key_preview_var,
-              font=FONT_SMALL, fg=COLOR_BTN_ALT,
-              bg=COLOR_BG).pack(side=LEFT, padx=(12, 0))
+              font=FONT_SMALL, fg=COLOR_TEXT_WEAK,
+              bg=COLOR_CARD).pack(side=LEFT, padx=(SPACE_MD, 0))
         self._refresh_key_preview()
 
         # ── 图片预览区 ──
-        self.img_frame = Frame(self.root, bg='white',
+        self.img_frame = Frame(self.root, bg=COLOR_CARD,
                               highlightbackground=COLOR_BORDER,
                               highlightthickness=1)
-        self.img_frame.pack(fill=BOTH, expand=True, padx=14, pady=(4,6))
+        self.img_frame.pack(fill=BOTH, expand=True, padx=SPACE_LG, pady=SPACE_XS)
         self.img_frame.pack_propagate(False)
 
-        self.img_label = Label(self.img_frame, bg='white', anchor=CENTER)
+        self.img_label = Label(self.img_frame, bg=COLOR_CARD, anchor=CENTER)
         self.img_label.pack(fill=BOTH, expand=True)
         self.img_label.bind("<Double-Button-1>", self.open_current_file)
 
@@ -520,50 +576,57 @@ class Phoo:
         self._info_expanded = False  # 是否展开完整元数据
         self._info_label = Label(
             self.img_frame, text="", anchor='ne',
-            bg='#f5f5f5', fg='#333333',
-            font=FONT_SMALL, padx=8, pady=4,
+            bg='#fafafa', fg=COLOR_TEXT,
+            font=FONT_SMALL, padx=SPACE_SM, pady=SPACE_XS,
             justify=RIGHT, relief=FLAT, bd=0,
             cursor='hand2')
         self._info_label.place(relx=1.0, rely=0.0, anchor='ne')
         self._info_label.bind('<Button-1>', lambda e: self._toggle_info_expand())
 
-        # ── 输出文件夹行（动态生成）──
-        self.out_line = Frame(self.root, bg=COLOR_BG)
-        self.out_line.pack(fill=X, padx=10, pady=(2,4))
+        # ── 输出文件夹行（动态生成，卡片包裹）──
+        self.out_card = Frame(self.root, bg=COLOR_CARD,
+                              highlightbackground=COLOR_BORDER,
+                              highlightthickness=1)
+        self.out_card.pack(fill=X, padx=SPACE_LG, pady=(SPACE_XS, SPACE_SM))
+        self.out_line = Frame(self.out_card, bg=COLOR_CARD)
+        self.out_line.pack(fill=X, padx=SPACE_SM, pady=SPACE_SM)
         self.out_entries = []
         self._build_output_rows()
 
         # ── 状态栏 ──
         status_bar = Frame(self.root, bg=COLOR_STATUS_BG)
         status_bar.pack(side=BOTTOM, fill=X)
+        # 顶部分隔线
+        Frame(status_bar, height=1, bg=COLOR_BORDER).pack(fill=X)
 
         self.status = Label(status_bar, text="", bd=0, relief=FLAT, anchor=W,
                            bg=COLOR_STATUS_BG, font=FONT_SMALL,
-                           padx=8, pady=4)
+                           fg=COLOR_TEXT_SEC,
+                           padx=SPACE_SM, pady=SPACE_XS)
         self.status.pack(side=LEFT, fill=X, expand=True)
 
-        # 进度条（紧贴状态栏右侧）
+        # 进度条
         self._progress_var = DoubleVar(value=0)
         self._progress_bar = ttk.Progressbar(
             status_bar, variable=self._progress_var,
-            maximum=100, length=160, mode='determinate')
-        self._progress_bar.pack(side=RIGHT, padx=(0, 10), pady=3)
+            maximum=100, length=140, mode='determinate')
+        self._progress_bar.pack(side=RIGHT, padx=(0, SPACE_SM), pady=2)
         self._progress_label = Label(
             status_bar, text="", bg=COLOR_STATUS_BG,
-            font=FONT_SMALL, fg='#555')
-        self._progress_label.pack(side=RIGHT, padx=(0, 4), pady=3)
+            font=FONT_SMALL, fg=COLOR_TEXT_SEC)
+        self._progress_label.pack(side=RIGHT, padx=(0, SPACE_XS), pady=2)
 
-        # 应用按钮（状态栏右侧，进度条左侧）
+        # 应用按钮
         self._apply_btn = Button(
             status_bar, text="应用 (0)",
             command=self.apply_pending,
-            bg='#4CAF50', fg='white',
-            activebackground='#45a049',
+            bg=COLOR_SUCCESS, fg='white',
             bd=0, padx=10, pady=2,
             font=FONT_SMALL, cursor='hand2',
             state=DISABLED
         )
-        self._apply_btn.pack(side=RIGHT, padx=(0, 6), pady=3)
+        self._apply_btn.pack(side=RIGHT, padx=(0, SPACE_XS), pady=2)
+        _bind_hover(self._apply_btn, COLOR_SUCCESS, '#059669')
 
         # ── 绑定快捷键 ──
         self._bind_hotkeys()
@@ -600,35 +663,39 @@ class Phoo:
             row = i // COLS
             col = i % COLS
 
-            cell = Frame(self.out_line, bg=COLOR_BG)
-            cell.grid(row=row, column=col, sticky='ew', padx=(0, 8) if col < COLS - 1 else 0,
-                      pady=(0, 4) if row < (n - 1) // COLS else 0)
+            cell = Frame(self.out_line, bg=COLOR_CARD)
+            cell.grid(row=row, column=col, sticky='ew', padx=(0, SPACE_SM) if col < COLS - 1 else 0,
+                      pady=(0, SPACE_XS) if row < (n - 1) // COLS else 0)
 
             btn_text = f"[{key}] 文件夹{i+1}"
-            Button(cell, text=btn_text,
+            btn_folder = Button(cell, text=btn_text,
                    command=lambda f=fo: self.browse_output(f),
                    bg=COLOR_BTN, fg=COLOR_BTN_FG, font=FONT_BOLD,
                    padx=6, pady=3, bd=0,
-                   cursor='hand2').pack(side=LEFT)
+                   cursor='hand2')
+            btn_folder.pack(side=LEFT)
+            _bind_hover(btn_folder, COLOR_BTN, '#2563eb')
             hint = f'输出文件夹 {i+1} 的路径'
             e = HintEntry(cell, textvariable=fo["path"],
                           hint=hint, state='readonly')
-            e.pack(side=LEFT, fill=X, expand=True, padx=(4, 0))
+            e.pack(side=LEFT, fill=X, expand=True, padx=(SPACE_XS, 0))
             self.out_entries.append(e)
 
             # 文件夹已有照片数标签（点击可打开文件夹）
-            cnt_lbl = Label(cell, text="", bg=COLOR_BG,
-                            font=FONT_SMALL, fg='#52b788', width=6,
+            cnt_lbl = Label(cell, text="", bg=COLOR_CARD,
+                            font=FONT_SMALL, fg=COLOR_SUCCESS, width=6,
                             cursor='hand2')
-            cnt_lbl.pack(side=LEFT, padx=(2, 0))
+            cnt_lbl.pack(side=LEFT, padx=(SPACE_XS, 0))
             cnt_lbl.bind('<Button-1>', lambda e, idx=i: self._open_folder_by_idx(idx))
             self._folder_count_labels.append(cnt_lbl)
 
-            Button(cell, text="✚",
+            btn_plus = Button(cell, text="✚",
                    command=lambda idx=i: self.quick_create_folder(idx),
-                   bg='#52b788', fg='white', font=('', 11, 'bold'),
+                   bg=COLOR_SUCCESS, fg='white', font=('', 11, 'bold'),
                    padx=4, pady=1, bd=0,
-                   cursor='hand2').pack(side=LEFT, padx=(2, 0))
+                   cursor='hand2')
+            btn_plus.pack(side=LEFT, padx=(SPACE_XS, 0))
+            _bind_hover(btn_plus, COLOR_SUCCESS, '#059669')
 
     def _bind_hotkeys(self):
         """解绑旧快捷键，绑定新快捷键"""
@@ -767,22 +834,32 @@ class Phoo:
         n = self.folder_count_var.get()
         key_list = "、".join(k.upper() for k in self.hotkeys[:n])
         txt = (
-            "图片分类工具 优化版\n"
-            "操作指南：\n"
-            "  1. 选择输入文件夹（浏览按钮）\n"
-            "  2. 选择 2~9 个输出文件夹\n"
-            f"  3. 按 {key_list} 分类到对应文件夹（可自定义快捷键）\n"
-            "  4. Tab 键快速切换复制/移动模式\n"
-            "  5. W=跳过  Del=删除  I=查看元数据  Ctrl+Z=撤销\n"
-            "  6. 双击预览图用系统程序打开"
+            "\n\n"
+            "📷  Phoo\n"
+            "    图片 / 视频分类工具\n"
+            "\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "\n"
+            f"  分类快捷键：{key_list}\n"
+            "\n"
+            "  W  跳过当前文件\n"
+            "  Del  标记删除\n"
+            "  I  查看文件元数据\n"
+            "  Ctrl+Z  撤销上一步\n"
+            "  Tab  切换复制/移动\n"
+            "  双击  用系统程序打开\n"
+            "\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "\n"
+            "  选择输入文件夹，开始分类 →\n"
         )
-        self.img_label.config(text=txt, fg='#444',
+        self.img_label.config(text=txt, fg=COLOR_TEXT_SEC,
                             font=FONT_WELCOME,
-                            bg='white', justify=LEFT)
+                            bg=COLOR_CARD, justify=CENTER)
 
     def show_error(self, msg):
-        self.img_label.config(text=msg, fg='#c0392b',
-                             font=FONT_NORMAL, bg='white')
+        self.img_label.config(text=msg, fg=COLOR_DANGER,
+                             font=FONT_NORMAL, bg=COLOR_CARD)
 
     def _get_file_datetime(self, filepath):
         """
@@ -1542,12 +1619,12 @@ class Phoo:
             self.status.config(
                 text=(f"  {self.ptr + 1}/{remaining} 待分类  ·  "
                       f"本次已规划 {done} 项  ·  {cur}    [{mode}模式]"),
-                fg='black')
+                fg=COLOR_TEXT)
             self._progress_var.set(pct)
             self._progress_label.config(
                 text=f"{pct:.0f}%  ({done}/{total_session})")
         else:
-            self.status.config(text="", fg='black')
+            self.status.config(text="", fg=COLOR_TEXT)
             self._progress_var.set(0)
             self._progress_label.config(text="")
 
@@ -1557,13 +1634,13 @@ class Phoo:
             self._apply_btn.config(
                 text=f"应用 ({n})",
                 state=NORMAL,
-                bg='#4CAF50', fg='white'
+                bg=COLOR_SUCCESS, fg='white'
             )
         else:
             self._apply_btn.config(
                 text="已应用",
                 state=DISABLED,
-                bg='SystemButtonFace', fg='gray'
+                bg='#e5e7eb', fg='#9ca3af'
             )
 
         # 刷新每个输出文件夹的照片计数
@@ -1615,6 +1692,7 @@ class Phoo:
             dlg = Toplevel(self.root)
             dlg.title("未应用的操作")
             dlg.resizable(False, False)
+            dlg.configure(bg=COLOR_CARD)
             dlg.grab_set()
             dlg.transient(self.root)
 
@@ -1626,11 +1704,12 @@ class Phoo:
             dlg.geometry(f"{dw}x{dh}+{x}+{y}")
 
             Label(dlg, text=f"还有 {count} 项未应用的操作",
-                  font=('', 11, 'bold')).pack(pady=(18, 4))
+                  font=('', 11, 'bold'), bg=COLOR_CARD,
+                  fg=COLOR_TEXT).pack(pady=(18, 4))
             Label(dlg, text=f"{classify_n} 项分类  ·  {delete_n} 项删除",
-                  fg='#555').pack()
+                  fg=COLOR_TEXT_SEC, bg=COLOR_CARD).pack()
 
-            btn_frame = Frame(dlg)
+            btn_frame = Frame(dlg, bg=COLOR_CARD)
             btn_frame.pack(pady=(14, 0))
 
             def on_apply():
@@ -1645,12 +1724,16 @@ class Phoo:
                 result['choice'] = 'cancel'
                 dlg.destroy()
 
-            Button(btn_frame, text="应用我的分类", command=on_apply,
-                   bg='#4CAF50', fg='white', font=('', 10, 'bold'),
-                   padx=12, pady=4, bd=0, cursor='hand2').pack(side=LEFT, padx=6)
-            Button(btn_frame, text="放弃分类", command=on_discard,
-                   bg='#e53935', fg='white', font=('', 10),
-                   padx=12, pady=4, bd=0, cursor='hand2').pack(side=LEFT, padx=6)
+            btn_apply = Button(btn_frame, text="应用我的分类", command=on_apply,
+                   bg=COLOR_SUCCESS, fg='white', font=('', 10, 'bold'),
+                   padx=12, pady=4, bd=0, cursor='hand2')
+            btn_apply.pack(side=LEFT, padx=6)
+            _bind_hover(btn_apply, COLOR_SUCCESS, '#059669')
+            btn_discard = Button(btn_frame, text="放弃分类", command=on_discard,
+                   bg=COLOR_DANGER, fg='white', font=('', 10),
+                   padx=12, pady=4, bd=0, cursor='hand2')
+            btn_discard.pack(side=LEFT, padx=6)
+            _bind_hover(btn_discard, COLOR_DANGER, '#dc2626')
             Button(btn_frame, text="取消", command=on_cancel,
                    font=('', 10), padx=12, pady=4, bd=1,
                    cursor='hand2').pack(side=LEFT, padx=6)
