@@ -269,7 +269,7 @@ class KeybindDialog(Toplevel):
                   fg=COLOR_BTN_ALT, bg=COLOR_BG).grid(
                       row=i+2, column=2, padx=10)
 
-        note = (f"保留键：W=跳过  Del=删除  Ctrl+Z=撤销  Tab=切换模式\n"
+        note = (f"保留键：W=跳过  Del=删除  I=元数据  Ctrl+Z=撤销  Tab=切换模式\n"
                 "请勿将上述键设为分类快捷键")
         Label(self, text=note, font=FONT_SMALL,
               fg=COLOR_BTN_ALT, bg=COLOR_BG).grid(
@@ -304,7 +304,7 @@ class KeybindDialog(Toplevel):
             if len(k) != 1:
                 messagebox.showwarning("提示", f"文件夹 {i+1} 的快捷键请输入单个字符", parent=self)
                 return
-            reserved = {'w', '\t'}  # tab 用于切换模式
+            reserved = {'w', '\t', 'i'}  # tab=切换模式, i=元数据
             if k in reserved:
                 messagebox.showwarning("提示",
                     f"字符 '{k}' 是系统保留快捷键，请换一个", parent=self)
@@ -621,6 +621,8 @@ class Phoo:
         self.root.bind('<Control-z>', lambda e: self.undo())
         self.root.bind('<Tab>', lambda e: self.toggle_copy_mode())
         self.root.bind('<Delete>', lambda e: self.delete_current())
+        self.root.bind('<KeyPress-i>', lambda e: self.show_metadata_dialog())
+        self.root.bind('<KeyPress-I>', lambda e: self.show_metadata_dialog())
 
     def _on_folder_count_change(self):
         """文件夹数量改变时重建 UI"""
@@ -635,7 +637,7 @@ class Phoo:
         n = self.folder_count_var.get()
         parts = [f"[{self.hotkeys[i].upper()}]=文件夹{i+1}" for i in range(n)]
         self._key_preview_var.set("  " + "  ".join(parts) +
-                                   "  [W]=跳过  [Del]=删除  [Ctrl+Z]=撤销  [Tab]=切换模式")
+                                   "  [W]=跳过  [Del]=删除  [I]=元数据  [Ctrl+Z]=撤销  [Tab]=切换模式")
 
     def _open_keybind_dialog(self):
         n = self.folder_count_var.get()
@@ -742,7 +744,7 @@ class Phoo:
             "  2. 选择 2~9 个输出文件夹\n"
             f"  3. 按 {key_list} 分类到对应文件夹（可自定义快捷键）\n"
             "  4. Tab 键快速切换复制/移动模式\n"
-            "  5. W=跳过  Del=删除  Ctrl+Z=撤销\n"
+            "  5. W=跳过  Del=删除  I=查看元数据  Ctrl+Z=撤销\n"
             "  6. 双击预览图用系统程序打开"
         )
         self.img_label.config(text=txt, fg='#444',
@@ -868,6 +870,155 @@ class Phoo:
         except Exception:
             return ""
 
+    def _get_exif_data(self, filepath):
+        """
+        读取图片的完整 EXIF 元数据，返回结构化字典。
+        仅对图片格式有效（JPG/JPEG/PNG/TIFF/BMP）。
+        """
+        result = {}
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext not in ('.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp'):
+            return result
+
+        try:
+            img = Image.open(filepath)
+            exif = img._getexif()
+            if not exif:
+                return result
+        except Exception:
+            return result
+
+        # ── 拍摄设备 ──
+        make = exif.get(271, '')   # Make
+        model = exif.get(272, '')  # Model
+        if make and model:
+            # 去重：有些相机 Make 和 Model 前缀重复
+            if model.startswith(make):
+                result['设备'] = model
+            else:
+                result['设备'] = f"{make} {model}"
+        elif model:
+            result['设备'] = model
+        elif make:
+            result['设备'] = make
+
+        # ── 镜头信息 ──
+        lens_make = exif.get(42035, '')  # LensMake
+        lens_model = exif.get(42036, '') # LensModel
+        if lens_model:
+            result['镜头'] = lens_model
+        elif lens_make:
+            result['镜头'] = lens_make
+
+        # ── 拍摄参数 ──
+        # 光圈
+        fnum = exif.get(33437)  # FNumber
+        if fnum:
+            try:
+                f_val = fnum[0] / fnum[1]
+                result['光圈'] = f"f/{f_val:.1f}"
+            except (TypeError, ZeroDivisionError):
+                pass
+
+        # 快门速度
+        exp_time = exif.get(33434)  # ExposureTime
+        if exp_time:
+            try:
+                num, den = exp_time
+                if den == 1:
+                    result['快门'] = f"{num}s"
+                elif num == 1:
+                    result['快门'] = f"1/{den}s"
+                else:
+                    result['快门'] = f"{num}/{den}s"
+            except (TypeError, ZeroDivisionError):
+                pass
+
+        # ISO
+        iso = exif.get(34855)  # ISOSpeedRatings
+        if iso:
+            result['ISO'] = str(iso)
+
+        # 焦距
+        focal = exif.get(37386)  # FocalLength
+        if focal:
+            try:
+                fl = focal[0] / focal[1]
+                result['焦距'] = f"{fl:.0f}mm"
+            except (TypeError, ZeroDivisionError):
+                pass
+
+        # 35mm等效焦距
+        focal_35 = exif.get(41989)  # FocalLengthIn35mmFilm
+        if focal_35:
+            result['等效焦距'] = f"{focal_35}mm"
+
+        # 闪光灯
+        flash = exif.get(37385)  # Flash
+        if flash is not None:
+            result['闪光灯'] = "已使用" if flash & 1 else "未使用"
+
+        # ── GPS 信息 ──
+        gps_lat = exif.get(34853, {})  # GPSInfo
+        if isinstance(gps_lat, dict):
+            lat_dms = gps_lat.get(2)  # GPSLatitude
+            lat_ref = gps_lat.get(1)  # GPSLatitudeRef
+            lon_dms = gps_lat.get(4)  # GPSLongitude
+            lon_ref = gps_lat.get(3)  # GPSLongitudeRef
+            alt = gps_lat.get(6)      # GPSAltitude
+
+            if lat_dms and lat_ref and lon_dms and lon_ref:
+                try:
+                    lat = self._dms_to_decimal(lat_dms, lat_ref)
+                    lon = self._dms_to_decimal(lon_dms, lon_ref)
+                    result['GPS纬度'] = f"{lat:.4f}° {lat_ref}"
+                    result['GPS经度'] = f"{lon:.4f}° {lon_ref}"
+                except (TypeError, ZeroDivisionError, IndexError):
+                    pass
+
+            if alt:
+                try:
+                    alt_val = alt[0] / alt[1]
+                    result['GPS海拔'] = f"{alt_val:.1f}m"
+                except (TypeError, ZeroDivisionError):
+                    pass
+
+        # ── 图像信息 ──
+        width = exif.get(40962)  # ExifImageWidth (PixelXDimension)
+        height = exif.get(40963) # ExifImageHeight (PixelYDimension)
+        if width and height:
+            result['分辨率'] = f"{width} × {height}"
+
+        orientation = exif.get(274)  # Orientation
+        if orientation:
+            orient_map = {1: "正常", 2: "水平翻转", 3: "旋转180°",
+                         4: "垂直翻转", 5: "顺时针90°+水平翻转",
+                         6: "顺时针90°", 7: "逆时针90°+水平翻转",
+                         8: "逆时针90°"}
+            result['方向'] = orient_map.get(orientation, str(orientation))
+
+        # 色彩空间
+        cs = exif.get(40961)  # ColorSpace
+        if cs is not None:
+            result['色彩空间'] = "sRGB" if cs == 1 else f"Uncalibrated ({cs})"
+
+        # 软件
+        software = exif.get(305)  # Software
+        if software:
+            result['软件'] = software
+
+        return result
+
+    def _dms_to_decimal(self, dms, ref):
+        """将 EXIF GPS 的度分秒格式转为十进制坐标"""
+        d = dms[0][0] / dms[0][1]
+        m = dms[1][0] / dms[1][1]
+        s = dms[2][0] / dms[2][1]
+        decimal = d + m / 60 + s / 3600
+        if ref in ('S', 'W'):
+            decimal = -decimal
+        return decimal
+
     def _is_valid_date(self, dt):
         """校验日期是否在合理范围内（2000年~明年）"""
         now = datetime.datetime.now()
@@ -973,7 +1124,7 @@ class Phoo:
         self._update_info_label(f)
 
     def _update_info_label(self, filepath):
-        """更新预览区右上角的文件类型 + 拍摄日期标签"""
+        """更新预览区右上角的文件类型 + 拍摄日期 + 设备/参数/GPS 标签"""
         type_str = self._get_file_type_label(filepath)
         date_str = self._get_file_datetime(filepath)
 
@@ -1009,11 +1160,25 @@ class Phoo:
                 except Exception:
                     date_note = ""
 
+        # ── 读取 EXIF 扩展信息 ──
+        exif_info = self._get_exif_data(filepath)
+        lines = [type_str]
         if date_str:
-            self._info_label.config(
-                text=f"{type_str}  |  📅 {date_str} {date_note}")
-        else:
-            self._info_label.config(text=f"{type_str}")
+            lines.append(f"📅 {date_str} {date_note}".strip())
+        if '设备' in exif_info:
+            lines.append(f"📱 {exif_info['设备']}")
+        # 拍摄参数（光圈+快门+ISO 合并一行）
+        param_parts = []
+        for k in ('光圈', '快门', 'ISO'):
+            if k in exif_info:
+                param_parts.append(exif_info[k])
+        if param_parts:
+            lines.append("⚙️ " + " · ".join(param_parts))
+        # GPS 坐标
+        if 'GPS纬度' in exif_info and 'GPS经度' in exif_info:
+            lines.append(f"📍 {exif_info['GPS纬度']}, {exif_info['GPS经度']}")
+
+        self._info_label.config(text="\n".join(lines))
 
     def _show_video_thumbnail(self, filepath):
         """用 OpenCV 提取视频首帧，缩放后显示在预览区"""
@@ -1054,6 +1219,198 @@ class Phoo:
         # 在缩略图右下角叠加"视频"标签
         self.img_label.config(image=ph, text="")
         self.img_label.image = ph
+
+    def show_metadata_dialog(self):
+        """按 I 键弹出完整元数据详情窗口"""
+        if not self.all_images:
+            return
+        filepath = self.all_images[self.ptr]
+
+        dlg = Toplevel(self.root)
+        dlg.title("文件元数据")
+        dlg.configure(bg=COLOR_BG)
+        dlg.resizable(True, True)
+
+        # ── 收集所有元数据 ──
+        sections = []  # [(section_name, [(key, value), ...])]
+
+        # 基本信息
+        basic = []
+        basic.append(("文件名", os.path.basename(filepath)))
+        basic.append(("路径", os.path.dirname(filepath)))
+        try:
+            size = os.path.getsize(filepath)
+            if size >= 1024 * 1024:
+                basic.append(("文件大小", f"{size / 1024 / 1024:.1f} MB"))
+            else:
+                basic.append(("文件大小", f"{size / 1024:.1f} KB"))
+        except Exception:
+            pass
+        basic.append(("文件类型", self._get_file_type_label(filepath)))
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext in self.img_ext:
+            try:
+                img = Image.open(filepath)
+                basic.append(("分辨率", f"{img.width} × {img.height}"))
+            except Exception:
+                pass
+        sections.append(("基本信息", basic))
+
+        # 拍摄时间
+        time_info = []
+        date_str = self._get_file_datetime(filepath)
+        if date_str:
+            time_info.append(("拍摄日期", date_str))
+        # 文件系统时间
+        try:
+            ctime = datetime.datetime.fromtimestamp(os.path.getctime(filepath))
+            time_info.append(("创建时间", ctime.strftime("%Y-%m-%d %H:%M:%S")))
+        except Exception:
+            pass
+        try:
+            mtime = datetime.datetime.fromtimestamp(os.path.getmtime(filepath))
+            time_info.append(("修改时间", mtime.strftime("%Y-%m-%d %H:%M:%S")))
+        except Exception:
+            pass
+        if time_info:
+            sections.append(("时间信息", time_info))
+
+        # EXIF 信息（图片）
+        if ext in ('.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp'):
+            exif_data = self._get_exif_data(filepath)
+
+            # 拍摄设备
+            device_info = []
+            for k in ('设备', '镜头', '软件'):
+                if k in exif_data:
+                    device_info.append((k, exif_data[k]))
+            if device_info:
+                sections.append(("拍摄设备", device_info))
+
+            # 拍摄参数
+            param_info = []
+            for k in ('光圈', '快门', 'ISO', '焦距', '等效焦距', '闪光灯'):
+                if k in exif_data:
+                    param_info.append((k, exif_data[k]))
+            if param_info:
+                sections.append(("拍摄参数", param_info))
+
+            # GPS
+            gps_info = []
+            for k in ('GPS纬度', 'GPS经度', 'GPS海拔'):
+                if k in exif_data:
+                    gps_info.append((k, exif_data[k]))
+            if gps_info:
+                sections.append(("位置信息", gps_info))
+
+            # 图像属性
+            img_info = []
+            for k in ('分辨率', '方向', '色彩空间'):
+                if k in exif_data:
+                    img_info.append((k, exif_data[k]))
+            if img_info:
+                sections.append(("图像属性", img_info))
+
+        # 视频信息
+        elif ext in self.vid_ext and HAS_CV2:
+            video_info = []
+            try:
+                cap = cv2.VideoCapture(filepath)
+                if cap.isOpened():
+                    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    video_info.append(("分辨率", f"{w} × {h}"))
+                    if fps > 0:
+                        video_info.append(("帧率", f"{fps:.1f} fps"))
+                    if frames > 0 and fps > 0:
+                        duration = frames / fps
+                        mins = int(duration // 60)
+                        secs = duration % 60
+                        video_info.append(("时长", f"{mins}:{secs:05.2f}"))
+                        video_info.append(("总帧数", str(frames)))
+                    cap.release()
+            except Exception:
+                pass
+            if video_info:
+                sections.append(("视频信息", video_info))
+
+        # ── 构建 UI ──
+        # 标题
+        title_lbl = Label(dlg, text=f"📄 {os.path.basename(filepath)}",
+                         font=FONT_TITLE, bg=COLOR_BG, anchor='w')
+        title_lbl.pack(fill=X, padx=16, pady=(12, 4))
+
+        # 滚动区域
+        container = Frame(dlg, bg=COLOR_BG)
+        container.pack(fill=BOTH, expand=True, padx=16, pady=4)
+
+        canvas = Canvas(container, bg=COLOR_BG, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(container, orient=VERTICAL, command=canvas.yview)
+        scroll_frame = Frame(canvas, bg=COLOR_BG)
+
+        scroll_frame.bind("<Configure>",
+                          lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        scrollbar.pack(side=RIGHT, fill=Y)
+
+        # 鼠标滚轮支持
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        dlg.bind("<MouseWheel>", _on_mousewheel)
+
+        # 填充分区内容
+        for section_name, items in sections:
+            # 分区标题
+            sec_lbl = Label(scroll_frame, text=f"【{section_name}】",
+                           font=FONT_BOLD, bg=COLOR_BG, fg='#2c3e50',
+                           anchor='w')
+            sec_lbl.pack(fill=X, pady=(8, 2))
+
+            # 分隔线
+            sep = Frame(scroll_frame, height=1, bg=COLOR_BORDER)
+            sep.pack(fill=X, pady=(0, 4))
+
+            for key, value in items:
+                row = Frame(scroll_frame, bg=COLOR_BG)
+                row.pack(fill=X, pady=1)
+
+                key_lbl = Label(row, text=f"  {key}：", font=FONT_NORMAL,
+                               bg=COLOR_BG, fg='#555', width=10, anchor='e')
+                key_lbl.pack(side=LEFT)
+
+                val_lbl = Label(row, text=str(value), font=FONT_NORMAL,
+                               bg=COLOR_BG, fg='#222', anchor='w')
+                val_lbl.pack(side=LEFT, fill=X, expand=True, padx=(4, 0))
+
+        # 关闭按钮
+        btn_frm = Frame(dlg, bg=COLOR_BG)
+        btn_frm.pack(fill=X, padx=16, pady=(8, 12))
+        Button(btn_frm, text=" 关闭 ", command=dlg.destroy,
+               bg=COLOR_BTN_ALT, fg=COLOR_BTN_FG, font=FONT_BOLD,
+               padx=16, pady=4, bd=0, cursor='hand2').pack(side=RIGHT)
+
+        # Esc 关闭
+        dlg.bind('<Escape>', lambda e: dlg.destroy())
+
+        # 窗口大小 & 位置
+        dlg.geometry("520x500")
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        # 解绑鼠标滚轮（关闭时）
+        def _on_close():
+            try:
+                canvas.unbind_all("<MouseWheel>")
+            except Exception:
+                pass
+            dlg.destroy()
+        dlg.protocol("WM_DELETE_WINDOW", _on_close)
 
     def update_status_bar(self):
         if self.all_images:
