@@ -1603,17 +1603,78 @@ class Phoo:
                 lbl.config(text="")
 
     def _on_close(self):
-        """窗口关闭时检查待应用操作，确认后保存配置并退出"""
+        """窗口关闭时检查待应用操作，提供应用或放弃选项"""
         if self.pending_actions:
             count = len(self.pending_actions)
             classify_n = sum(1 for a in self.pending_actions if a['action'] != 'delete')
             delete_n = sum(1 for a in self.pending_actions if a['action'] == 'delete')
-            msg = (f"还有 {count} 项未应用的操作（"
-                   f"{classify_n} 项分类、{delete_n} 项删除）\n\n"
-                   f"关闭窗口将丢弃所有未应用的操作，确定要关闭吗？")
-            ok = messagebox.askyesno("未应用的操作", msg, parent=self.root)
-            if not ok:
+
+            # 自定义弹窗：应用 / 放弃 / 取消
+            result = {'choice': None}
+
+            dlg = Toplevel(self.root)
+            dlg.title("未应用的操作")
+            dlg.resizable(False, False)
+            dlg.grab_set()
+            dlg.transient(self.root)
+
+            # 居中显示
+            dlg.update_idletasks()
+            dw, dh = 380, 160
+            x = self.root.winfo_x() + (self.root.winfo_width() - dw) // 2
+            y = self.root.winfo_y() + (self.root.winfo_height() - dh) // 2
+            dlg.geometry(f"{dw}x{dh}+{x}+{y}")
+
+            Label(dlg, text=f"还有 {count} 项未应用的操作",
+                  font=('', 11, 'bold')).pack(pady=(18, 4))
+            Label(dlg, text=f"{classify_n} 项分类  ·  {delete_n} 项删除",
+                  fg='#555').pack()
+
+            btn_frame = Frame(dlg)
+            btn_frame.pack(pady=(14, 0))
+
+            def on_apply():
+                result['choice'] = 'apply'
+                dlg.destroy()
+
+            def on_discard():
+                result['choice'] = 'discard'
+                dlg.destroy()
+
+            def on_cancel():
+                result['choice'] = 'cancel'
+                dlg.destroy()
+
+            Button(btn_frame, text="应用我的分类", command=on_apply,
+                   bg='#4CAF50', fg='white', font=('', 10, 'bold'),
+                   padx=12, pady=4, bd=0, cursor='hand2').pack(side=LEFT, padx=6)
+            Button(btn_frame, text="放弃分类", command=on_discard,
+                   bg='#e53935', fg='white', font=('', 10),
+                   padx=12, pady=4, bd=0, cursor='hand2').pack(side=LEFT, padx=6)
+            Button(btn_frame, text="取消", command=on_cancel,
+                   font=('', 10), padx=12, pady=4, bd=1,
+                   cursor='hand2').pack(side=LEFT, padx=6)
+
+            dlg.protocol("WM_DELETE_WINDOW", on_cancel)
+            self.root.wait_window(dlg)
+
+            choice = result['choice']
+            if choice == 'cancel' or choice is None:
                 return
+            elif choice == 'apply':
+                # 执行所有待应用操作，全部成功则关闭
+                success, failed, errors = self._do_apply()
+                if failed > 0:
+                    messagebox.showwarning(
+                        "部分失败",
+                        f"成功：{success}，失败：{failed}\n\n" + "\n".join(errors[:10]),
+                        parent=self.root
+                    )
+                    return  # 有失败则不关闭
+                # 全部成功，继续关闭
+            elif choice == 'discard':
+                self.pending_actions.clear()
+
         self.save_config()
         self.root.destroy()
 
@@ -1678,12 +1739,8 @@ class Phoo:
         self.ptr = act['idx']
         self.update_display()
 
-    def apply_pending(self):
-        """批量执行所有待应用操作"""
-        if not self.pending_actions:
-            messagebox.showinfo("提示", "没有待应用的操作")
-            return
-
+    def _do_apply(self):
+        """执行所有待应用操作，返回 (success, failed, errors)"""
         success = 0
         failed = 0
         errors = []
@@ -1702,6 +1759,15 @@ class Phoo:
 
         self.pending_actions.clear()
         self.update_display()
+        return success, failed, errors
+
+    def apply_pending(self):
+        """批量执行所有待应用操作（由"应用"按钮触发）"""
+        if not self.pending_actions:
+            messagebox.showinfo("提示", "没有待应用的操作")
+            return
+
+        success, failed, errors = self._do_apply()
 
         if failed == 0:
             self._flash_status(f"✅ 已成功应用 {success} 项操作")
