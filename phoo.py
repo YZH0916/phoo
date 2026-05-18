@@ -485,6 +485,9 @@ class Phoo:
         self._motion_cap = None        # OpenCV VideoCapture 对象
         self._motion_temp_file = None  # 嵌入视频提取后的临时文件路径
 
+        # ── 旋转状态 ──
+        self._current_rotation = 0     # 当前旋转角度（90 的倍数）
+
         # ── Live Photo 配对 MOV 集合（被 load_images 排除的 .mov） ──
         self._live_mov_set = set()
 
@@ -646,6 +649,27 @@ class Phoo:
             cursor='hand2')
         self._info_label.place(relx=1.0, rely=0.0, anchor='ne')
         self._info_label.bind('<Button-1>', lambda e: self._toggle_info_expand())
+
+        # ── 旋转工具栏（预览区下方）──
+        rot_bar = Frame(self.root, bg=COLOR_CARD,
+                        highlightbackground=COLOR_BORDER,
+                        highlightthickness=1)
+        rot_bar.pack(fill=X, padx=SPACE_LG, pady=(0, SPACE_XS))
+
+        btn_rot_kw = dict(bg=COLOR_BTN_ALT, fg=COLOR_BTN_FG,
+                          activebackground='#5b6270', activeforeground='white',
+                          font=FONT_SMALL, bd=0, padx=10, pady=2, cursor='hand2')
+        Label(rot_bar, text="  旋转：", bg=COLOR_CARD, font=FONT_SMALL,
+              fg=COLOR_TEXT_SEC).pack(side=LEFT, padx=(SPACE_SM, 0))
+        Button(rot_bar, text="↺ 90°", command=self._rotate_left,
+               **btn_rot_kw).pack(side=LEFT, padx=2, pady=SPACE_SM)
+        Button(rot_bar, text="↻ 90°", command=self._rotate_right,
+               **btn_rot_kw).pack(side=LEFT, padx=2, pady=SPACE_SM)
+        Button(rot_bar, text="⇅ 180°", command=self._rotate_180,
+               **btn_rot_kw).pack(side=LEFT, padx=2, pady=SPACE_SM)
+        self._rot_label = Label(rot_bar, text="", bg=COLOR_CARD,
+                                font=FONT_SMALL, fg=COLOR_TEXT_WEAK)
+        self._rot_label.pack(side=LEFT, padx=(SPACE_SM, SPACE_SM))
 
         # ── 输出文件夹行（动态生成，卡片包裹）──
         self.out_card = Frame(self.root, bg=COLOR_CARD,
@@ -1410,6 +1434,100 @@ class Phoo:
         except Exception:
             return False
 
+    # ── 图片渲染（供 show_current 和旋转共用）─────────────────
+    def _display_image(self, img):
+        """按当前缩放模式将 PIL Image 显示到预览区（支持当前旋转角度）"""
+        frame_w = self.img_frame.winfo_width() - 10
+        frame_h = self.img_frame.winfo_height() - 10
+        if frame_w < 50 or frame_h < 50:
+            return
+
+        # 应用旋转
+        if self._current_rotation % 360 != 0:
+            img = img.rotate(self._current_rotation, Image.Resampling.BICUBIC, expand=True)
+
+        scale_mode = self.scale_mode.get()
+        dont_enlarge = self.dont_enlarge.get()
+
+        if scale_mode == "原始":
+            ph = ImageTk.PhotoImage(img)
+        elif scale_mode == "填充":
+            scale_w = frame_w / img.width
+            scale_h = frame_h / img.height
+            scale = max(scale_w, scale_h)
+            if dont_enlarge and scale > 1:
+                ph = ImageTk.PhotoImage(img)
+            else:
+                new_w = int(img.width * scale)
+                new_h = int(img.height * scale)
+                resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                ph = ImageTk.PhotoImage(resized)
+        else:
+            img_ratio = img.width / img.height
+            frame_ratio = frame_w / frame_h
+            if img.width <= frame_w and img.height <= frame_h and dont_enlarge:
+                ph = ImageTk.PhotoImage(img)
+            else:
+                if img_ratio > frame_ratio:
+                    new_w = frame_w
+                    new_h = int(frame_w / img_ratio)
+                else:
+                    new_h = frame_h
+                    new_w = int(frame_h * img_ratio)
+                resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                ph = ImageTk.PhotoImage(resized)
+
+        self.img_label.config(image=ph, text="")
+        self.img_label.image = ph
+
+    # ── 旋转操作 ─────────────────────────────────────────────
+    def _rotate_left(self):
+        """逆时针旋转 90°"""
+        self._current_rotation = (self._current_rotation - 90) % 360
+        self._apply_rotation_display()
+
+    def _rotate_right(self):
+        """顺时针旋转 90°"""
+        self._current_rotation = (self._current_rotation + 90) % 360
+        self._apply_rotation_display()
+
+    def _rotate_180(self):
+        """旋转 180°"""
+        self._current_rotation = (self._current_rotation + 180) % 360
+        self._apply_rotation_display()
+
+    def _apply_rotation_display(self):
+        """重新加载当前图片并应用旋转"""
+        if not self.all_images:
+            return
+        self._stop_motion_playback()
+        f = self.all_images[self.ptr]
+        ext = os.path.splitext(f)[1].lower()
+        if ext in self.vid_ext or ext in self.swf_ext:
+            return
+        try:
+            img = Image.open(f)
+            self._display_image(img)
+            # 更新旋转角度标签
+            if self._current_rotation % 360 != 0:
+                self._rot_label.config(text=f"已旋转 {self._current_rotation}°（移动时自动保存）")
+            else:
+                self._rot_label.config(text="")
+        except Exception:
+            pass
+
+    def _get_rotated_image(self, filepath):
+        """如果当前有旋转，返回旋转后的图片副本；否则返回 None"""
+        if self._current_rotation % 360 == 0 or not self.all_images:
+            return None
+        if not os.path.abspath(self.all_images[self.ptr]) == os.path.abspath(filepath):
+            return None
+        try:
+            img = Image.open(filepath)
+            return img.rotate(self._current_rotation, Image.Resampling.BICUBIC, expand=True)
+        except Exception:
+            return None
+
     def _get_file_type_label(self, filepath):
         """返回文件类型的中文标签"""
         ext = os.path.splitext(filepath)[1].lower()
@@ -1437,6 +1555,9 @@ class Phoo:
     def show_current(self):
         # ── 停止上一次动图播放 ──
         self._stop_motion_playback()
+        # ── 重置旋转角度 ──
+        self._current_rotation = 0
+        self._rot_label.config(text="")
 
         if not self.all_images: return
         f = self.all_images[self.ptr]
@@ -1466,47 +1587,7 @@ class Phoo:
         else:
             try:
                 img = Image.open(f)
-                frame_w = self.img_frame.winfo_width() - 10
-                frame_h = self.img_frame.winfo_height() - 10
-
-                if frame_w < 50 or frame_h < 50:
-                    return
-
-                scale_mode = self.scale_mode.get()
-                dont_enlarge = self.dont_enlarge.get()
-
-                if scale_mode == "原始":
-                    ph = ImageTk.PhotoImage(img)
-                elif scale_mode == "填充":
-                    scale_w = frame_w / img.width
-                    scale_h = frame_h / img.height
-                    scale = max(scale_w, scale_h)
-                    if dont_enlarge and scale > 1:
-                        ph = ImageTk.PhotoImage(img)
-                    else:
-                        new_w = int(img.width * scale)
-                        new_h = int(img.height * scale)
-                        resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-                        ph = ImageTk.PhotoImage(resized)
-                else:
-                    img_ratio = img.width / img.height
-                    frame_ratio = frame_w / frame_h
-
-                    if img.width <= frame_w and img.height <= frame_h and dont_enlarge:
-                        ph = ImageTk.PhotoImage(img)
-                    else:
-                        if img_ratio > frame_ratio:
-                            new_w = frame_w
-                            new_h = int(frame_w / img_ratio)
-                        else:
-                            new_h = frame_h
-                            new_w = int(frame_h * img_ratio)
-
-                        resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-                        ph = ImageTk.PhotoImage(resized)
-
-                self.img_label.config(image=ph, text="")
-                self.img_label.image = ph
+                self._display_image(img)
 
                 # ── 检测并自动播放动图 ──
                 motion = self._detect_motion_photo(f)
@@ -2220,11 +2301,16 @@ class Phoo:
 
         # 记录到待应用队列，不立即执行
         action = 'copy' if self.copy_mode.get() else 'move'
+        rotation = self._current_rotation if self._current_rotation % 360 != 0 else 0
         self.pending_actions.append({
-            'action': action, 'src': src, 'dst': dst, 'idx': self.ptr
+            'action': action, 'src': src, 'dst': dst, 'idx': self.ptr,
+            'rotation': rotation
         })
         # ── 联动移动配对文件（Live Photo .mov / vivo .mp4）──
         self._add_paired_action(src, fo, action)
+        # ── 旋转模式时：如果是复制则直接覆盖目标为旋转后版本 ──
+        #    如果是移动则覆盖源文件为旋转后版本（因为移动就是搬走）
+        #    实际保存延迟到 _do_apply 执行时
         self.all_images.pop(self.ptr)
         if self.all_images:
             self.ptr = self.ptr % len(self.all_images)
@@ -2246,7 +2332,17 @@ class Phoo:
         errors = []
         for act in list(self.pending_actions):
             try:
-                if act['action'] == 'copy':
+                rotation = act.get('rotation', 0)
+                if rotation and rotation % 360 != 0 and act.get('dst'):
+                    # 有旋转：先执行复制/移动，再覆盖目标为旋转后版本
+                    save_target = act['dst']
+                    if act['action'] == 'copy':
+                        shutil.copy2(act['src'], save_target)
+                    elif act['action'] == 'move':
+                        shutil.move(act['src'], save_target)
+                    # 保存旋转后的图片
+                    self._save_rotated_image(save_target, rotation)
+                elif act['action'] == 'copy':
                     shutil.copy2(act['src'], act['dst'])
                 elif act['action'] == 'move':
                     shutil.move(act['src'], act['dst'])
@@ -2260,6 +2356,29 @@ class Phoo:
         self.pending_actions.clear()
         self.update_display()
         return success, failed, errors
+
+    def _save_rotated_image(self, filepath, rotation):
+        """打开图片，旋转后覆盖保存（保持原格式和 EXIF）"""
+        try:
+            img = Image.open(filepath)
+            rotated = img.rotate(rotation, Image.Resampling.BICUBIC, expand=True)
+            # 保持原格式保存
+            save_kwargs = {}
+            if 'exif' in img.info:
+                save_kwargs['exif'] = img.info['exif']
+            if filepath.lower().endswith('.png'):
+                rotated.save(filepath, format='PNG')
+            elif filepath.lower().endswith(('.jpg', '.jpeg')):
+                rotated.save(filepath, format='JPEG', quality=95, **save_kwargs)
+            elif filepath.lower().endswith('.heic'):
+                # Pillow 默认不支持 HEIC 写入，回退到 JPEG
+                jpg_path = os.path.splitext(filepath)[0] + '.jpg'
+                rotated.save(jpg_path, format='JPEG', quality=95, **save_kwargs)
+            else:
+                # 其他格式尝试直接保存
+                rotated.save(filepath, **save_kwargs)
+        except Exception:
+            pass  # 旋转保存失败不影响主操作
 
     def apply_pending(self):
         """批量执行所有待应用操作（由"应用"按钮触发）"""
