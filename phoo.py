@@ -100,6 +100,8 @@ if __name__ == "__main__":
 import json
 import re
 import datetime
+import tempfile
+import xml.etree.ElementTree as ET
 from tkinter import *
 from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
@@ -477,11 +479,20 @@ class Phoo:
         # 每条: {'action': 'move'|'copy'|'delete', 'src': 原路径, 'dst': 目标路径, 'idx': 原索引}
         self.pending_actions = []
 
+        # ── 动图播放状态 ──
+        self._motion_playing = False   # 是否正在播放动图
+        self._motion_after_id = None   # after() 定时器 ID
+        self._motion_cap = None        # OpenCV VideoCapture 对象
+        self._motion_temp_file = None  # 嵌入视频提取后的临时文件路径
+
+        # ── Live Photo 配对 MOV 集合（被 load_images 排除的 .mov） ──
+        self._live_mov_set = set()
+
         # ── 进度恢复 ──
         self._saved_ptr = 0          # 从配置读取的上次 ptr
         self._saved_anchor = None    # 上次退出时的锚定文件名（用于精确恢复）
 
-        self.img_ext = ('.jpg','.jpeg','.png','.gif','.bmp','.tiff','.ico')
+        self.img_ext = ('.jpg','.jpeg','.png','.gif','.bmp','.tiff','.ico','.heic')
         self.vid_ext = ('.mp4','.avi','.mov','.wmv','.flv','.mkv')
         self.swf_ext = ('.swf',)
         self.supported_formats = self.img_ext + self.vid_ext + self.swf_ext
@@ -509,9 +520,9 @@ class Phoo:
         line1.pack(fill=X, padx=SPACE_SM, pady=(SPACE_SM, SPACE_XS))
         Label(line1, text="输入路径：", bg=COLOR_CARD, font=FONT_BOLD,
               fg=COLOR_TEXT).pack(side=LEFT)
-        self.input_entry = HintEntry(line1, textvariable_ref=self.input_folder,
+        self.input_entry = HintEntry(line1, textvariable=self.input_folder,
                                      hint='这里是需要处理的文件夹路径',
-                                     shorten_path=True, state='readonly')
+                                     state='readonly')
         self.input_entry.pack(side=LEFT, fill=X, expand=True, padx=SPACE_XS)
         btn_browse = Button(line1, text="浏览…", command=self.browse_input,
                bg=COLOR_BTN, fg=COLOR_BTN_FG, font=FONT_BOLD,
@@ -829,21 +840,40 @@ class Phoo:
 
     def load_images(self):
         self.all_images = []
+        self._live_mov_set.clear()
         if not self.input_folder.get(): return
         root_path = self.input_folder.get()
         if not os.path.exists(root_path): return
 
+        # 先收集所有符合条件的文件
+        all_files = []
         if self.inc_subfolders.get():
             for r, _, fs in os.walk(root_path):
                 for f in fs:
                     if f.lower().endswith(self.supported_formats):
-                        self.all_images.append(os.path.join(r, f))
+                        all_files.append(os.path.join(r, f))
         else:
             for f in os.listdir(root_path):
                 if f.lower().endswith(self.supported_formats):
                     full = os.path.join(root_path, f)
                     if os.path.isfile(full):
-                        self.all_images.append(full)
+                        all_files.append(full)
+
+        # ── 排除 Live Photo 配对的 .mov 文件（与 .heic/.jpg/.jpeg 同名） ──
+        img_basenames = set()
+        for fp in all_files:
+            ext = os.path.splitext(fp)[1].lower()
+            if ext in ('.heic', '.jpg', '.jpeg', '.png', '.tiff', '.bmp'):
+                img_basenames.add(os.path.splitext(fp)[0].lower())
+
+        for fp in all_files:
+            ext = os.path.splitext(fp)[1].lower()
+            if ext == '.mov':
+                base = os.path.splitext(fp)[0].lower()
+                if base in img_basenames and os.path.getsize(fp) > 0:
+                    self._live_mov_set.add(fp)
+                    continue
+            self.all_images.append(fp)
 
         rev = self.reverse_sort.get()
         if self.sort_method.get() == "time":
@@ -927,7 +957,7 @@ class Phoo:
         basename = os.path.splitext(os.path.basename(filepath))[0]
 
         # ── 1. 图片 EXIF ──
-        if ext in ('.jpg', '.jpeg', '.png', '.tiff', '.bmp'):
+        if ext in ('.jpg', '.jpeg', '.png', '.tiff', '.bmp', '.heic'):
             try:
                 img = Image.open(filepath)
                 exif = img._getexif()
@@ -1077,7 +1107,7 @@ class Phoo:
         """
         result = {}
         ext = os.path.splitext(filepath)[1].lower()
-        if ext not in ('.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp'):
+        if ext not in ('.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp', '.heic'):
             return result
 
         try:
@@ -1399,10 +1429,15 @@ class Phoo:
             return "图片 TIFF"
         elif ext == '.ico':
             return "图标 ICO"
+        elif ext == '.heic':
+            return "图片 HEIC"
         else:
             return f"文件 {ext}"
 
     def show_current(self):
+        # ── 停止上一次动图播放 ──
+        self._stop_motion_playback()
+
         if not self.all_images: return
         f = self.all_images[self.ptr]
         ext = os.path.splitext(f)[1].lower()
@@ -1433,13 +1468,13 @@ class Phoo:
                 img = Image.open(f)
                 frame_w = self.img_frame.winfo_width() - 10
                 frame_h = self.img_frame.winfo_height() - 10
-                
+
                 if frame_w < 50 or frame_h < 50:
                     return
-                
+
                 scale_mode = self.scale_mode.get()
                 dont_enlarge = self.dont_enlarge.get()
-                
+
                 if scale_mode == "原始":
                     ph = ImageTk.PhotoImage(img)
                 elif scale_mode == "填充":
@@ -1456,7 +1491,7 @@ class Phoo:
                 else:
                     img_ratio = img.width / img.height
                     frame_ratio = frame_w / frame_h
-                    
+
                     if img.width <= frame_w and img.height <= frame_h and dont_enlarge:
                         ph = ImageTk.PhotoImage(img)
                     else:
@@ -1466,12 +1501,23 @@ class Phoo:
                         else:
                             new_h = frame_h
                             new_w = int(frame_h * img_ratio)
-                        
+
                         resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
                         ph = ImageTk.PhotoImage(resized)
-                
+
                 self.img_label.config(image=ph, text="")
                 self.img_label.image = ph
+
+                # ── 检测并自动播放动图 ──
+                motion = self._detect_motion_photo(f)
+                if motion and HAS_CV2:
+                    video_path = motion.get('video_path')
+                    if motion.get('embedded') and not video_path:
+                        video_path = self._extract_embedded_video(f)
+                        if video_path:
+                            self._motion_temp_file = video_path
+                    if video_path:
+                        self._start_motion_playback(video_path)
             except Exception as e:
                 self.img_label.config(text=f"无法加载图片：{e}", fg='red')
 
@@ -1560,7 +1606,7 @@ class Phoo:
         if date_str:
             basename = os.path.splitext(os.path.basename(filepath))[0]
             from_exif = False
-            if ext in ('.jpg', '.jpeg', '.png', '.tiff', '.bmp'):
+            if ext in ('.jpg', '.jpeg', '.png', '.tiff', '.bmp', '.heic'):
                 try:
                     img = Image.open(filepath)
                     exif = img._getexif()
@@ -1592,6 +1638,12 @@ class Phoo:
         # ── 位置信息判断 ──
         has_gps = ('GPS纬度' in exif_info and 'GPS经度' in exif_info)
         location_str = "位置信息：有" if has_gps else "位置信息：无"
+
+        # ── 动图检测 ──
+        motion = self._detect_motion_photo(filepath) if ext in self.img_ext else None
+        if motion:
+            motion_labels = {'apple': '🎬 Live Photo', 'android': '🎬 Motion Photo', 'vivo': '🎬 动图'}
+            type_str = f"{type_str} {motion_labels.get(motion['type'], '🎬 动图')}"
 
         lines = [type_str]
         if date_str:
@@ -1737,6 +1789,234 @@ class Phoo:
         self.img_label.config(image=ph, text="")
         self.img_label.image = ph
 
+    # ── 动图（Live Photo / Motion Photo）检测 ──────────────────
+    _GCAM_NS = 'http://ns.google.com/photos/1.0/camera/'
+
+    def _detect_motion_photo(self, filepath):
+        """检测动图，返回 dict 或 None。
+        返回格式: {'type': 'apple'|'android'|'vivo', 'video_path': ...} 或 {'type': 'android', 'embedded': True}
+        """
+        base, ext = os.path.splitext(filepath)
+        ext_lower = ext.lower()
+
+        # ── 1. Apple Live Photo: 同名 .mov 配对 ──
+        for mov_ext in ('.mov', '.MOV'):
+            mov_path = base + mov_ext
+            if os.path.isfile(mov_path) and os.path.getsize(mov_path) > 0:
+                return {'type': 'apple', 'video_path': mov_path}
+
+        # ── 2. Android Motion Photo: XMP 嵌入标记 ──
+        if ext_lower in ('.jpg', '.jpeg'):
+            try:
+                img = Image.open(filepath)
+                xmp_data = img.info.get('xmp') or img.info.get('XML:com.apple.markup')
+                if not xmp_data:
+                    # Pillow 可能未提取 XMP，回退到二进制搜索
+                    xmp_data = self._extract_xmp_binary(filepath)
+                if xmp_data:
+                    is_motion = False
+                    try:
+                        root = ET.fromstring(xmp_data)
+                        for elem in root.iter():
+                            tag = elem.tag
+                            if 'MotionPhoto' in tag:
+                                if elem.text and elem.text.strip() == '1':
+                                    is_motion = True
+                                    break
+                            if 'MicroVideo' in tag:
+                                if elem.text and elem.text.strip() == '1':
+                                    is_motion = True
+                                    break
+                    except ET.ParseError:
+                        # XMP 解析失败，用字符串搜索兜底
+                        if 'MotionPhoto="1"' in xmp_data or 'MotionPhoto=1' in xmp_data \
+                           or 'MicroVideo="1"' in xmp_data or 'MicroVideo=1' in xmp_data:
+                            is_motion = True
+                    if is_motion:
+                        return {'type': 'android', 'embedded': True}
+            except Exception:
+                pass
+
+        # ── 3. vivo 独立配对: 同名 .mp4 ──
+        for mp4_ext in ('.mp4', '.MP4'):
+            mp4_path = base + mp4_ext
+            if os.path.isfile(mp4_path) and os.path.getsize(mp4_path) > 0:
+                return {'type': 'vivo', 'video_path': mp4_path}
+
+        return None
+
+    def _extract_xmp_binary(self, filepath):
+        """从 JPEG 二进制中提取 XMP packet（Pillow 未能提取时的回退方案）"""
+        try:
+            with open(filepath, 'rb') as f:
+                data = f.read(65536)  # XMP 通常在文件头部 64KB 内
+            # 搜索 XMP packet 起止标记
+            start = data.find(b'<x:xmpmeta')
+            if start == -1:
+                start = data.find(b'<xmp:xmpmeta')
+            if start == -1:
+                start = data.find(b'<rdf:RDF')
+            if start == -1:
+                return None
+            end = data.find(b'</x:xmpmeta>', start)
+            if end == -1:
+                end = data.find(b'</xmp:xmpmeta>', start)
+            if end == -1:
+                end = data.find(b'</rdf:RDF>', start)
+            if end == -1:
+                return None
+            end += len(b'</rdf:RDF>') if b'</rdf:RDF>' in data[start:] else \
+                  len(b'</x:xmpmeta>') if b'</x:xmpmeta>' in data[start:] else \
+                  len(b'</xmp:xmpmeta>')
+            return data[start:end].decode('utf-8', errors='ignore')
+        except Exception:
+            return None
+
+    # ── 动图嵌入视频提取 ──────────────────────────────────────
+    def _extract_embedded_video(self, filepath):
+        """从 Android Motion Photo 的 JPEG 文件中提取嵌入的视频，返回临时文件路径"""
+        try:
+            with open(filepath, 'rb') as f:
+                data = f.read()
+
+            # 找到 JPEG EOF marker (FFD9) — 取最后一个（有些 JPEG 有缩略图 EOI）
+            eof_pos = data.rfind(b'\xff\xd9')
+            if eof_pos == -1:
+                return None
+            video_start = eof_pos + 2
+
+            if video_start >= len(data):
+                return None
+
+            video_data = data[video_start:]
+
+            # 检查 Samsung MotionPhoto_Data footer（末尾可能有 16 字节标记）
+            # 格式: "MotionPhoto_Data\0" (16 bytes)
+            samsung_footer = b'MotionPhoto_Data\x00'
+            samsung_pos = video_data.find(samsung_footer)
+            if samsung_pos > 0:
+                video_data = video_data[:samsung_pos]
+
+            # 验证视频数据以 ftyp 开头（MP4/MOV 容器）
+            if not video_data.startswith(b'\x00\x00\x00') and \
+               b'ftyp' not in video_data[:32]:
+                return None
+
+            tmp = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False)
+            tmp.write(video_data)
+            tmp.close()
+            return tmp.name
+        except Exception:
+            return None
+
+    # ── 动图自动播放 ──────────────────────────────────────────
+    def _start_motion_playback(self, video_path):
+        """开始播放动图视频（循环）"""
+        if not HAS_CV2:
+            return
+        self._stop_motion_playback()
+        try:
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                return
+            self._motion_cap = cap
+            self._motion_playing = True
+            self._motion_next_frame()
+        except Exception:
+            self._stop_motion_playback()
+
+    def _motion_next_frame(self):
+        """读取并显示下一帧视频"""
+        if not self._motion_playing or not self._motion_cap:
+            return
+        try:
+            ret, frame = self._motion_cap.read()
+            if not ret:
+                # 视频结束，回到开头循环
+                self._motion_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ret, frame = self._motion_cap.read()
+                if not ret:
+                    self._stop_motion_playback()
+                    return
+
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(frame_rgb)
+
+            frame_w = self.img_frame.winfo_width() - 10
+            frame_h = self.img_frame.winfo_height() - 10
+            if frame_w < 50 or frame_h < 50:
+                self._motion_after_id = self.root.after(33, self._motion_next_frame)
+                return
+
+            # 保持比例适应窗口（使用 BILINEAR 加速）
+            img_ratio = img.width / img.height
+            frame_ratio = frame_w / frame_h
+            if img.width <= frame_w and img.height <= frame_h:
+                ph = ImageTk.PhotoImage(img)
+            elif img_ratio > frame_ratio:
+                new_w = frame_w
+                new_h = int(frame_w / img_ratio)
+                resized = img.resize((new_w, new_h), Image.Resampling.BILINEAR)
+                ph = ImageTk.PhotoImage(resized)
+            else:
+                new_h = frame_h
+                new_w = int(frame_h * img_ratio)
+                resized = img.resize((new_w, new_h), Image.Resampling.BILINEAR)
+                ph = ImageTk.PhotoImage(resized)
+
+            self.img_label.config(image=ph, text="")
+            self.img_label.image = ph
+        except Exception:
+            self._stop_motion_playback()
+            return
+
+        self._motion_after_id = self.root.after(33, self._motion_next_frame)
+
+    def _stop_motion_playback(self):
+        """停止动图播放，释放资源"""
+        self._motion_playing = False
+        if self._motion_after_id is not None:
+            self.root.after_cancel(self._motion_after_id)
+            self._motion_after_id = None
+        if self._motion_cap is not None:
+            self._motion_cap.release()
+            self._motion_cap = None
+        # 清理临时提取的视频文件
+        if self._motion_temp_file is not None:
+            try:
+                os.remove(self._motion_temp_file)
+            except Exception:
+                pass
+            self._motion_temp_file = None
+
+    def _add_paired_action(self, src_image, dest_folder, action):
+        """联动移动/复制配对文件（Live Photo .mov / vivo .mp4）到 pending_actions"""
+        motion = self._detect_motion_photo(src_image)
+        if not motion or not motion.get('video_path'):
+            return
+        paired_src = motion['video_path']
+        paired_name = os.path.basename(paired_src)
+        paired_dst = os.path.join(dest_folder, paired_name)
+        # 处理目标重名
+        base_p, ext_p = os.path.splitext(paired_name)
+        c = 1
+        while os.path.exists(paired_dst):
+            paired_dst = os.path.join(dest_folder, f"{base_p}_{c}{ext_p}")
+            c += 1
+        self.pending_actions.append({
+            'action': action, 'src': paired_src, 'dst': paired_dst, 'idx': None
+        })
+
+    def _add_paired_delete(self, src_image):
+        """联动删除配对文件（Live Photo .mov / vivo .mp4）到 pending_actions"""
+        motion = self._detect_motion_photo(src_image)
+        if not motion or not motion.get('video_path'):
+            return
+        paired_src = motion['video_path']
+        self.pending_actions.append({
+            'action': 'delete', 'src': paired_src, 'dst': None, 'idx': None
+        })
+
     def update_status_bar(self):
         """更新状态栏：统计待应用操作数，并刷新应用按钮"""
         if self.all_images:
@@ -1813,6 +2093,7 @@ class Phoo:
 
     def _on_close(self):
         """窗口关闭时检查待应用操作，提供应用或放弃选项"""
+        self._stop_motion_playback()
         if self.pending_actions:
             count = len(self.pending_actions)
             classify_n = sum(1 for a in self.pending_actions if a['action'] != 'delete')
@@ -1906,6 +2187,8 @@ class Phoo:
         self.pending_actions.append({
             'action': 'delete', 'src': src, 'dst': None, 'idx': self.ptr
         })
+        # ── 联动删除配对文件（Live Photo .mov / vivo .mp4）──
+        self._add_paired_delete(src)
         self.all_images.pop(self.ptr)
         if self.all_images:
             self.ptr = self.ptr % len(self.all_images)
@@ -1940,6 +2223,8 @@ class Phoo:
         self.pending_actions.append({
             'action': action, 'src': src, 'dst': dst, 'idx': self.ptr
         })
+        # ── 联动移动配对文件（Live Photo .mov / vivo .mp4）──
+        self._add_paired_action(src, fo, action)
         self.all_images.pop(self.ptr)
         if self.all_images:
             self.ptr = self.ptr % len(self.all_images)
