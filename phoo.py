@@ -767,6 +767,9 @@ class Phoo:
             e = HintEntry(cell, textvariable_ref=fo["path"],
                           hint=hint, shorten_path=True, state='readonly')
             e.pack(side=LEFT, fill=X, expand=True, padx=(SPACE_XS, 0))
+            # 点击路径文本可打开对应文件夹
+            e.config(cursor='hand2')
+            e.bind('<Button-1>', lambda evt, idx=i: self._open_folder_by_idx(idx))
             self.out_entries.append(e)
 
             # 文件夹已有照片数标签（点击可打开文件夹）
