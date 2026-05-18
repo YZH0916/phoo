@@ -98,6 +98,7 @@ if __name__ == "__main__":
     check_and_install_dependencies()
 
 import json
+import webbrowser
 import re
 import datetime
 import tempfile
@@ -1267,10 +1268,16 @@ class Phoo:
         return result
 
     def _dms_to_decimal(self, dms, ref):
-        """将 EXIF GPS 的度分秒格式转为十进制坐标"""
-        d = dms[0][0] / dms[0][1]
-        m = dms[1][0] / dms[1][1]
-        s = dms[2][0] / dms[2][1]
+        """将 EXIF GPS 的度分秒格式转为十进制坐标，兼容 Rational 和 float 两种格式"""
+        def _to_float(v):
+            try:
+                return v[0] / v[1]  # Rational / IFDRational
+            except TypeError:
+                return float(v)     # 直接 float
+
+        d = _to_float(dms[0])
+        m = _to_float(dms[1])
+        s = _to_float(dms[2])
         decimal = d + m / 60 + s / 3600
         if ref in ('S', 'W'):
             decimal = -decimal
@@ -1721,7 +1728,10 @@ class Phoo:
 
         # ── 位置信息判断 ──
         has_gps = ('GPS纬度' in exif_info and 'GPS经度' in exif_info)
-        location_str = "位置信息：有" if has_gps else "位置信息：无"
+        if has_gps:
+            location_str = f"📍 {exif_info['GPS纬度']}, {exif_info['GPS经度']}"
+        else:
+            location_str = ""
 
         # ── 动图检测 ──
         motion = self._detect_motion_photo(filepath) if ext in self.img_ext else None
@@ -1766,7 +1776,8 @@ class Phoo:
                 if img_parts:
                     lines.append("|".join(img_parts))
 
-            lines.append(location_str)
+            if location_str:
+                lines.append(location_str)
             lines.append("[I] 展开 ▼")
         else:
             # ── 展开模式：全部元数据 ──
@@ -1823,7 +1834,8 @@ class Phoo:
                 for k, v in video_info.items():
                     lines.append(f"  {k}: {v}")
 
-            lines.append(location_str)
+            if location_str:
+                lines.append(location_str)
             lines.append("[I] 收起 ▲")
 
         return lines
@@ -1832,6 +1844,23 @@ class Phoo:
         """更新预览区右上角的信息标签"""
         lines = self._build_info_lines(filepath)
         self._info_label.config(text="\n".join(lines))
+
+        # 双击打开 Google Maps（仅当有 GPS 坐标时生效）
+        exif_info = self._get_exif_data(filepath)
+        has_gps = ('GPS纬度' in exif_info and 'GPS经度' in exif_info)
+        if has_gps:
+            lat_str, lon_str = exif_info['GPS纬度'], exif_info['GPS经度']
+            lat = float(re.search(r'[\d.]+', lat_str).group())
+            lon = float(re.search(r'[\d.]+', lon_str).group())
+            if 'S' in lat_str:
+                lat = -lat
+            if 'W' in lon_str:
+                lon = -lon
+            url = f"https://www.google.com/maps?q={lat},{lon}"
+            self._info_label.bind('<Double-Button-1>',
+                                 lambda e, u=url: webbrowser.open(u))
+        else:
+            self._info_label.unbind('<Double-Button-1>')
 
     def _show_video_thumbnail(self, filepath):
         """用 OpenCV 提取视频首帧，缩放后显示在预览区"""
