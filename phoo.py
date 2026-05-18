@@ -115,7 +115,7 @@ except ImportError:
     cv2 = None
     HAS_CV2 = False
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 # ── 默认快捷键配置（最多支持 MAX_FOLDERS 个文件夹）──
 MAX_FOLDERS = 9
