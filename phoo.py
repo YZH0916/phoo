@@ -960,6 +960,47 @@ class Phoo:
                 except ValueError:
                     continue
 
+        # 2d. 两位年份格式（如 24.6.13 / 24-06-13 / 24_06_13，常见于手动命名）
+        #     格式A：YY.M.D[.HH.MM[.SS]] — 点号分隔，可选时分秒（贪心，先匹配最长）
+        for pat in [
+            r'(?<!\d)(\d{2})\.(\d{1,2})\.(\d{1,2})\.(\d{1,2})\.(\d{1,2})\.(\d{1,2})(?!\d)',
+            r'(?<!\d)(\d{2})\.(\d{1,2})\.(\d{1,2})\.(\d{1,2})\.(\d{1,2})(?!\d)',
+            r'(?<!\d)(\d{2})\.(\d{1,2})\.(\d{1,2})(?!\d)',
+        ]:
+            m = re.search(pat, basename)
+            if m:
+                g = [int(x) for x in m.groups()]
+                yy, mo, day = g[0], g[1], g[2]
+                if not (1 <= mo <= 12 and 1 <= day <= 31):
+                    continue
+                year = 2000 + yy
+                try:
+                    if len(g) == 6:
+                        dt = datetime.datetime(year, mo, day, g[3], g[4], g[5])
+                    elif len(g) == 5:
+                        dt = datetime.datetime(year, mo, day, g[3], g[4])
+                    else:
+                        dt = datetime.datetime(year, mo, day)
+                    if self._is_valid_date(dt):
+                        fmt = "%Y-%m-%d %H:%M" if len(g) >= 5 else "%Y-%m-%d"
+                        return dt.strftime(fmt)
+                except ValueError:
+                    continue
+        #     格式B：YY-MM-DD 或 YY_MM_DD（防止误截4位年份末尾两位）
+        m = re.search(r'(?<!\d)(\d{2})[-_](\d{2})[-_](\d{2})(?!\d)', basename)
+        if m:
+            yy, mo, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if 1 <= mo <= 12 and 1 <= day <= 31:
+                start = m.start()
+                if not (start >= 2 and basename[start-2:start].isdigit()):
+                    year = 2000 + yy
+                    try:
+                        dt = datetime.datetime(year, mo, day)
+                        if self._is_valid_date(dt):
+                            return dt.strftime("%Y-%m-%d")
+                    except ValueError:
+                        pass
+
         # ── 3. 文件创建时间 ──
         try:
             ctime = os.path.getctime(filepath)
@@ -1189,6 +1230,44 @@ class Phoo:
                         return dt
                 except ValueError:
                     continue
+
+        # 4. 两位年份格式（YY.M.D / YY-MM-DD / YY_MM_DD）
+        for pat in [
+            r'(?<!\d)(\d{2})\.(\d{1,2})\.(\d{1,2})\.(\d{1,2})\.(\d{1,2})\.(\d{1,2})(?!\d)',
+            r'(?<!\d)(\d{2})\.(\d{1,2})\.(\d{1,2})\.(\d{1,2})\.(\d{1,2})(?!\d)',
+            r'(?<!\d)(\d{2})\.(\d{1,2})\.(\d{1,2})(?!\d)',
+        ]:
+            m = re.search(pat, basename)
+            if m:
+                g = [int(x) for x in m.groups()]
+                yy, mo, day = g[0], g[1], g[2]
+                if not (1 <= mo <= 12 and 1 <= day <= 31):
+                    continue
+                year = 2000 + yy
+                try:
+                    if len(g) == 6:
+                        dt = datetime.datetime(year, mo, day, g[3], g[4], g[5])
+                    elif len(g) == 5:
+                        dt = datetime.datetime(year, mo, day, g[3], g[4])
+                    else:
+                        dt = datetime.datetime(year, mo, day)
+                    if self._is_valid_date(dt):
+                        return dt
+                except ValueError:
+                    continue
+        m = re.search(r'(?<!\d)(\d{2})[-_](\d{2})[-_](\d{2})(?!\d)', basename)
+        if m:
+            yy, mo, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if 1 <= mo <= 12 and 1 <= day <= 31:
+                start = m.start()
+                if not (start >= 2 and basename[start-2:start].isdigit()):
+                    year = 2000 + yy
+                    try:
+                        dt = datetime.datetime(year, mo, day)
+                        if self._is_valid_date(dt):
+                            return dt
+                    except ValueError:
+                        pass
 
         return None
 
