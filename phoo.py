@@ -651,26 +651,21 @@ class Phoo:
         self._info_label.place(relx=1.0, rely=0.0, anchor='ne')
         self._info_label.bind('<Button-1>', lambda e: self._toggle_info_expand())
 
-        # ── 旋转工具栏（预览区下方）──
-        rot_bar = Frame(self.root, bg=COLOR_CARD,
-                        highlightbackground=COLOR_BORDER,
-                        highlightthickness=1)
-        rot_bar.pack(fill=X, padx=SPACE_LG, pady=(0, SPACE_XS))
+        # ── 旋转按钮（预览区右下角）──
+        rot_frame = Frame(self.img_frame, bg='#fafafa')
+        rot_frame.place(relx=1.0, rely=1.0, anchor='se', x=-4, y=-4)
+
+        self._rot_label = Label(rot_frame, text="", bg='#fafafa',
+                                font=FONT_SMALL, fg=COLOR_TEXT_WEAK)
+        self._rot_label.pack(side=LEFT, padx=(0, SPACE_SM))
 
         btn_rot_kw = dict(bg=COLOR_BTN_ALT, fg=COLOR_BTN_FG,
                           activebackground='#5b6270', activeforeground='white',
-                          font=FONT_SMALL, bd=0, padx=10, pady=2, cursor='hand2')
-        Label(rot_bar, text="  旋转：", bg=COLOR_CARD, font=FONT_SMALL,
-              fg=COLOR_TEXT_SEC).pack(side=LEFT, padx=(SPACE_SM, 0))
-        Button(rot_bar, text="↺ 90°", command=self._rotate_left,
-               **btn_rot_kw).pack(side=LEFT, padx=2, pady=SPACE_SM)
-        Button(rot_bar, text="↻ 90°", command=self._rotate_right,
-               **btn_rot_kw).pack(side=LEFT, padx=2, pady=SPACE_SM)
-        Button(rot_bar, text="⇅ 180°", command=self._rotate_180,
-               **btn_rot_kw).pack(side=LEFT, padx=2, pady=SPACE_SM)
-        self._rot_label = Label(rot_bar, text="", bg=COLOR_CARD,
-                                font=FONT_SMALL, fg=COLOR_TEXT_WEAK)
-        self._rot_label.pack(side=LEFT, padx=(SPACE_SM, SPACE_SM))
+                          font=FONT_SMALL, bd=0, padx=8, pady=1, cursor='hand2')
+        Button(rot_frame, text="↺", command=self._rotate_left,
+               **btn_rot_kw).pack(side=LEFT, padx=1)
+        Button(rot_frame, text="↻", command=self._rotate_right,
+               **btn_rot_kw).pack(side=LEFT, padx=1)
 
         # ── 输出文件夹行（动态生成，卡片包裹）──
         self.out_card = Frame(self.root, bg=COLOR_CARD,
@@ -1499,11 +1494,6 @@ class Phoo:
     def _rotate_right(self):
         """顺时针旋转 90°"""
         self._current_rotation = (self._current_rotation + 90) % 360
-        self._apply_rotation_display()
-
-    def _rotate_180(self):
-        """旋转 180°"""
-        self._current_rotation = (self._current_rotation + 180) % 360
         self._apply_rotation_display()
 
     def _apply_rotation_display(self):
