@@ -112,6 +112,8 @@ except ImportError:
     cv2 = None
     HAS_CV2 = False
 
+__version__ = "2.0.0"
+
 # ── 默认快捷键配置（最多支持 MAX_FOLDERS 个文件夹）──
 MAX_FOLDERS = 9
 DEFAULT_KEYS = ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l']
@@ -155,21 +157,71 @@ def _bind_hover(widget, bg, hover_bg):
 
 
 class HintEntry(Entry):
-    def __init__(self, master, hint='', **kw):
-        super().__init__(master, **kw)
-        self.hint = hint
-        self.hint_color = '#9ca3af'
-        self.normal_color = self['fg']
+    def __init__(self, master, hint='', shorten_path=False, textvariable_ref=None, **kw):
+        # shorten_path 模式：不传 textvariable 给 Entry，避免双向绑定冲突
+        if shorten_path and textvariable_ref:
+            self._var = textvariable_ref
+            self._shorten_path = True
+            kw.pop('textvariable', None)
+            super().__init__(master, **kw)
+            # 先初始化颜色和 hint，再注册 trace 回调
+            self.hint = hint
+            self.hint_color = '#9ca3af'
+            self.normal_color = self['fg']
+            self._var.trace_add("write", self._on_var_change)
+            self._on_var_change()
+            # 鼠标悬停时显示完整路径
+            self.bind('<Enter>', self._show_full_path)
+            self.bind('<Leave>', self._show_short_path)
+        else:
+            self._shorten_path = False
+            super().__init__(master, **kw)
+            self.hint = hint
+            self.hint_color = '#9ca3af'
+            self.normal_color = self['fg']
+            self._show_hint()
         self.bind('<FocusIn>',  self._clear_hint)
         self.bind('<FocusOut>', self._show_hint)
-        self._show_hint()
+
+    def _on_var_change(self, *_):
+        """StringVar 变化时更新缩略显示"""
+        if not self._shorten_path: return
+        val = self._var.get()
+        self.config(state='normal')
+        self.delete(0, END)
+        if val:
+            short = os.path.basename(val.rstrip(os.sep))
+            self.insert(0, short)
+            self.config(fg=self.normal_color)
+        else:
+            self.insert(0, self.hint)
+            self.config(fg=self.hint_color)
+        self.config(state='readonly')
+
+    def _show_full_path(self, *_):
+        """鼠标进入时显示完整路径"""
+        if not self._shorten_path: return
+        val = self._var.get()
+        if val:
+            self.config(state='normal')
+            self.delete(0, END)
+            self.insert(0, val)
+            self.config(fg=self.normal_color)
+            self.config(state='readonly')
+
+    def _show_short_path(self, *_):
+        """鼠标离开时恢复缩略显示"""
+        if not self._shorten_path: return
+        self._on_var_change()
 
     def _clear_hint(self, *_):
+        if self._shorten_path: return
         if self['fg'] == self.hint_color:
             self.delete(0, END)
             self.config(fg=self.normal_color)
 
     def _show_hint(self, *_):
+        if self._shorten_path: return
         if not self.get():
             self.insert(0, self.hint)
             self.config(fg=self.hint_color)
@@ -363,7 +415,7 @@ class KeybindDialog(Toplevel):
 class Phoo:
     def __init__(self, root):
         self.root = root
-        self.root.title("图片分类工具")
+        self.root.title(f"图片分类工具 v{__version__}")
         
         self.windowed_height_ratio = 0.75
         self.windowed_geometry_set = False
@@ -457,8 +509,9 @@ class Phoo:
         line1.pack(fill=X, padx=SPACE_SM, pady=(SPACE_SM, SPACE_XS))
         Label(line1, text="输入路径：", bg=COLOR_CARD, font=FONT_BOLD,
               fg=COLOR_TEXT).pack(side=LEFT)
-        self.input_entry = HintEntry(line1, textvariable=self.input_folder,
-                                     hint='这里是需要处理的文件夹路径', state='readonly')
+        self.input_entry = HintEntry(line1, textvariable_ref=self.input_folder,
+                                     hint='这里是需要处理的文件夹路径',
+                                     shorten_path=True, state='readonly')
         self.input_entry.pack(side=LEFT, fill=X, expand=True, padx=SPACE_XS)
         btn_browse = Button(line1, text="浏览…", command=self.browse_input,
                bg=COLOR_BTN, fg=COLOR_BTN_FG, font=FONT_BOLD,
@@ -676,8 +729,8 @@ class Phoo:
             btn_folder.pack(side=LEFT)
             _bind_hover(btn_folder, COLOR_BTN, '#2563eb')
             hint = f'输出文件夹 {i+1} 的路径'
-            e = HintEntry(cell, textvariable=fo["path"],
-                          hint=hint, state='readonly')
+            e = HintEntry(cell, textvariable_ref=fo["path"],
+                          hint=hint, shorten_path=True, state='readonly')
             e.pack(side=LEFT, fill=X, expand=True, padx=(SPACE_XS, 0))
             self.out_entries.append(e)
 
