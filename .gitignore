@@ -1,31 +1,35 @@
 # Python
-*.pyc
 __pycache__/
-*.pyo
-*.egg-info/
-dist/
+*.py[cod]
+*$py.class
+*.so
+.Python
 build/
-*.spec
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# Config (personal paths)
-phoo_config.json
-classifier_config.json
-
-# Archives
-*.zip
-*.tar.gz
-*.rar
-
-# OS
-.DS_Store
-Thumbs.db
-desktop.ini
+# Virtual Environment
+venv/
+env/
+.venv/
 
 # IDE
-.vscode/
 .idea/
+.vscode/
 *.swp
 *.swo
 
-# WorkBuddy
-.workbuddy/
+# Local config (not for GitHub)
+phoo_config.json
