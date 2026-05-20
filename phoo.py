@@ -103,6 +103,7 @@ import re
 import datetime
 import tempfile
 import xml.etree.ElementTree as ET
+import hashlib
 from tkinter import *
 from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
@@ -115,7 +116,7 @@ except ImportError:
     cv2 = None
     HAS_CV2 = False
 
-__version__ = "2.1.0"
+__version__ = "2.2.6"
 
 # ── 默认快捷键配置（最多支持 MAX_FOLDERS 个文件夹）──
 MAX_FOLDERS = 9
@@ -319,7 +320,7 @@ class CreateFolderDialog(Toplevel):
 
 class KeybindDialog(Toplevel):
     """自定义快捷键对话框"""
-    def __init__(self, parent, folder_count, keys):
+    def __init__(self, parent, folder_count, keys, folder_names=None):
         super().__init__(parent)
         self.title("自定义快捷键")
         self.resizable(False, False)
@@ -327,6 +328,7 @@ class KeybindDialog(Toplevel):
         self.configure(bg=COLOR_CARD)
         self.result_keys = list(keys)
         self.folder_count = folder_count
+        self._folder_names = folder_names or []
         self.entries = []
 
         Label(self, text="设置各文件夹快捷键（单个字母/数字）",
@@ -341,7 +343,8 @@ class KeybindDialog(Toplevel):
               fg=COLOR_TEXT).grid(row=1, column=2, padx=10)
 
         for i in range(folder_count):
-            Label(self, text=f"文件夹 {i+1}", font=FONT_NORMAL, bg=COLOR_CARD,
+            name = self._folder_names[i] if i < len(self._folder_names) else f"文件夹 {i+1}"
+            Label(self, text=name, font=FONT_NORMAL, bg=COLOR_CARD,
                   fg=COLOR_TEXT).grid(
                 row=i+2, column=0, padx=10, pady=4)
             var = StringVar(value=keys[i])
@@ -501,6 +504,16 @@ class Phoo:
         self.swf_ext = ('.swf',)
         self.supported_formats = self.img_ext + self.vid_ext + self.swf_ext
 
+        # ── 查重设置 ──
+        self.dedup_enabled = BooleanVar(value=False)   # 是否启用查重
+        self.dedup_mode    = StringVar(value="skip")     # 处理方式：skip=跳过, delete=删除, ask=每次询问
+        # 查重缓存：(文件名, 大小) → [输出文件夹中的路径列表]
+        self._dedup_hash_cache = {}          # {(fname, fsize): [path1, path2, ...]}
+        self._dedup_hash_valid = False     # 缓存是否有效
+        self._dedup_scanning = False       # 是否正在后台扫描
+        self._dedup_scan_thread = None       # 扫描线程引用
+        self._dedup_progress_dlg = None    # 扫描进度对话框
+
         self.load_config()
         self.build_ui()
         self.root.after(100, lambda: self.root.focus_force())
@@ -615,6 +628,13 @@ class Phoo:
             command=self._on_folder_count_change)
         self._count_spinbox.pack(side=LEFT, padx=(0, SPACE_MD))
 
+        btn_new_sub = Button(line3, text="✚ 新建子文件夹",
+               command=self._global_create_subfolder,
+               bg=COLOR_SUCCESS, fg='white', font=FONT_BOLD,
+               padx=8, pady=3, bd=0, cursor='hand2')
+        btn_new_sub.pack(side=LEFT, padx=(0, SPACE_XS))
+        _bind_hover(btn_new_sub, COLOR_SUCCESS, '#059669')
+
         btn_keys = Button(line3, text="⌨ 自定义快捷键",
                command=self._open_keybind_dialog,
                bg=COLOR_BTN_ALT, fg=COLOR_BTN_FG, font=FONT_BOLD,
@@ -628,6 +648,14 @@ class Phoo:
               font=FONT_SMALL, fg=COLOR_TEXT_WEAK,
               bg=COLOR_CARD).pack(side=LEFT, padx=(SPACE_MD, 0))
         self._refresh_key_preview()
+
+        # ── 查重按钮（右侧）──
+        btn_dedup = Button(line3, text="🔍 查重",
+               command=self._show_dedup_settings,
+               bg='#e5e7eb', fg=COLOR_TEXT, font=FONT_NORMAL,
+               padx=10, pady=3, bd=0, cursor='hand2')
+        btn_dedup.pack(side=RIGHT, padx=(SPACE_SM, 0))
+        _bind_hover(btn_dedup, '#e5e7eb', '#d1d5db')
 
         # ── 图片预览区 ──
         self.img_frame = Frame(self.root, bg=COLOR_CARD,
@@ -650,6 +678,22 @@ class Phoo:
             cursor='hand2')
         self._info_label.place(relx=1.0, rely=0.0, anchor='ne')
         self._info_label.bind('<Button-1>', lambda e: self._toggle_info_expand())
+
+        # ── 预览区左下角：重复提醒 ──
+        self._dup_label = Label(
+            self.img_frame, text="", anchor='sw',
+            bg='#fafafa', fg=COLOR_DANGER,
+            font=FONT_SMALL, padx=SPACE_SM, pady=SPACE_XS,
+            relief=FLAT, bd=0)
+        self._dup_label.place(relx=0.0, rely=1.0, anchor='sw')
+
+        # ── 预览区左上角：素材类型标签 ──
+        self._type_label = Label(
+            self.img_frame, text="", anchor='nw',
+            bg='#fafafa', fg=COLOR_TEXT,
+            font=FONT_SMALL, padx=SPACE_SM, pady=SPACE_XS,
+            relief=FLAT, bd=0)
+        self._type_label.place(relx=0.0, rely=0.0, anchor='nw')
 
         # ── 旋转按钮（预览区右下角）──
         rot_frame = Frame(self.img_frame, bg='#fafafa')
@@ -776,13 +820,19 @@ class Phoo:
             cnt_lbl.bind('<Button-1>', lambda e, idx=i: self._open_folder_by_idx(idx))
             self._folder_count_labels.append(cnt_lbl)
 
-            btn_plus = Button(cell, text="✚",
-                   command=lambda idx=i: self.quick_create_folder(idx),
-                   bg=COLOR_SUCCESS, fg='white', font=('', 11, 'bold'),
+            # 删除该分类按钮（仅当 > 2 个时可用）
+            can_del = n > 2
+            btn_del = Button(cell, text="✕",
+                   command=lambda idx=i: self.remove_folder(idx),
+                   bg='#fce7e7' if can_del else '#f3f4f6',
+                   fg=COLOR_DANGER if can_del else COLOR_TEXT_WEAK,
+                   font=('', 10, 'bold'),
                    padx=4, pady=1, bd=0,
-                   cursor='hand2')
-            btn_plus.pack(side=LEFT, padx=(SPACE_XS, 0))
-            _bind_hover(btn_plus, COLOR_SUCCESS, '#059669')
+                   cursor='hand2' if can_del else 'arrow',
+                   state=NORMAL if can_del else DISABLED)
+            btn_del.pack(side=LEFT, padx=(SPACE_XS, 0))
+            if can_del:
+                _bind_hover(btn_del, '#fce7e7', '#fecaca')
 
     def _bind_hotkeys(self):
         """解绑旧快捷键，绑定新快捷键"""
@@ -824,7 +874,11 @@ class Phoo:
 
     def _open_keybind_dialog(self):
         n = self.folder_count_var.get()
-        dlg = KeybindDialog(self.root, n, self.hotkeys[:n])
+        folder_names = []
+        for i in range(n):
+            p = self.output_folders[i]["path"].get()
+            folder_names.append(os.path.basename(p) if p else f"文件夹{i+1}")
+        dlg = KeybindDialog(self.root, n, self.hotkeys[:n], folder_names)
         new_keys = dlg.result_keys
         # 更新实际 hotkeys（只更新前 n 个）
         for i in range(n):
@@ -853,6 +907,48 @@ class Phoo:
     def _restore_status(self):
         self.status.config(fg='black')
         self.update_status_bar()
+
+    def _show_toast(self, title, message, duration=3500):
+        """显示一个浮窗弱提醒，duration 毫秒后自动消失"""
+        toast = Toplevel(self.root)
+        toast.overrideredirect(True)
+        toast.attributes('-topmost', True)
+        toast.configure(bg=COLOR_CARD, highlightbackground=COLOR_BORDER,
+                        highlightthickness=1)
+        toast.resizable(False, False)
+
+        frm = Frame(toast, bg=COLOR_CARD, padx=18, pady=12)
+        frm.pack()
+
+        Label(frm, text=title, font=FONT_BOLD, bg=COLOR_CARD,
+              fg=COLOR_SUCCESS).pack(anchor='w')
+        Label(frm, text=message, font=FONT_SMALL, bg=COLOR_CARD,
+              fg=COLOR_TEXT_SEC, justify=LEFT).pack(anchor='w', pady=(4, 0))
+
+        # 定位到主窗口中下方
+        toast.update_idletasks()
+        tw, th = toast.winfo_width(), toast.winfo_height()
+        rx = self.root.winfo_x() + (self.root.winfo_width() - tw) // 2
+        ry = self.root.winfo_y() + self.root.winfo_height() - th - 60
+        toast.geometry(f"+{rx}+{ry}")
+
+        toast.after(duration, toast.destroy)
+
+    def _on_classify_done(self):
+        """所有文件分类完毕后的处理"""
+        count = len(self.pending_actions)
+        action = "复制" if self.copy_mode.get() else "移动"
+        self.img_label.config(
+            text=f"\n\n  ✅ 全部分类完成！\n\n"
+                 f"  共 {count} 项待{action}操作\n\n"
+                 f"  请点击「应用」执行\n",
+            fg=COLOR_SUCCESS, font=FONT_WELCOME,
+            bg=COLOR_CARD, justify=CENTER)
+        self._type_label.config(text="")
+        self._dup_label.config(text="")
+        self._show_toast(
+            "✅ 全部分类完成",
+            f"共 {count} 项待{action}操作，请点击「应用」执行")
 
     # ──────────────────────────────────────────────
     #  原有逻辑（基本不变）
@@ -896,6 +992,11 @@ class Phoo:
                 if base in img_basenames and os.path.getsize(fp) > 0:
                     self._live_mov_set.add(fp)
                     continue
+            # ── 排除 vivo 配对的 .mp4 文件（与 .jpg/.jpeg 同名，作为图片的配对视频）──
+            if ext == '.mp4':
+                base = os.path.splitext(fp)[0].lower()
+                if base in img_basenames and os.path.getsize(fp) > 0:
+                    continue
             self.all_images.append(fp)
 
         rev = self.reverse_sort.get()
@@ -928,7 +1029,12 @@ class Phoo:
         if not os.path.exists(self.input_folder.get()):
             self.show_error(f"目录：{self.input_folder.get()} 不存在"); return
         if not self.all_images:
-            self.show_error(f"目录：{self.input_folder.get()} 没有图片"); return
+            # 分类完毕 vs 初始无文件
+            if self.pending_actions:
+                self._on_classify_done()
+            else:
+                self.show_error(f"目录：{self.input_folder.get()} 没有图片")
+            return
         n = self.folder_count_var.get()
         valid = sum(1 for i in range(n) if self.output_folders[i]["path"].get())
         if valid < 2:
@@ -962,10 +1068,342 @@ class Phoo:
         self.img_label.config(text=txt, fg=COLOR_TEXT_SEC,
                             font=FONT_WELCOME,
                             bg=COLOR_CARD, justify=CENTER)
+        self._type_label.config(text="")
 
     def show_error(self, msg):
         self.img_label.config(text=msg, fg=COLOR_DANGER,
                              font=FONT_NORMAL, bg=COLOR_CARD)
+
+    # ──────────────────────────────────────────────
+    #  查重功能核心方法
+    # ──────────────────────────────────────────────
+    def _compute_file_hash(self, filepath, chunk_size=1048576):
+        """计算文件 MD5 哈希，分块读取支持大文件，默认1MB分块"""
+        h = hashlib.md5()
+        try:
+            with open(filepath, 'rb') as f:
+                while True:
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+            return h.hexdigest()
+        except Exception:
+            return None
+
+    def _scan_output_hashes(self):
+        """扫描所有输出文件夹，建立哈希缓存（后台线程+进度条）"""
+        # 如果正在扫描，直接返回
+        if self._dedup_scanning:
+            return
+
+        self._dedup_scanning = True
+        self._dedup_hash_cache.clear()
+        self._dedup_hash_valid = False
+        n = self.folder_count_var.get()
+
+        # 收集所有需要扫描的文件
+        files_to_scan = []
+        for i in range(n):
+            path = self.output_folders[i]["path"].get()
+            if not path or not os.path.isdir(path):
+                continue
+            for f in os.listdir(path):
+                full = os.path.join(path, f)
+                if os.path.isfile(full) and f.lower().endswith(self.supported_formats):
+                    files_to_scan.append(full)
+
+        total = len(files_to_scan)
+        if total == 0:
+            self._dedup_hash_valid = True
+            self._dedup_scanning = False
+            return
+
+        # 创建进度条对话框
+        self._show_scan_progress(total)
+
+        # 启动后台扫描线程
+        import threading
+        self._dedup_scan_thread = threading.Thread(
+            target=self._bg_scan_worker,
+            args=(files_to_scan,),
+            daemon=True
+        )
+        self._dedup_scan_thread.start()
+
+    def _show_scan_progress(self, total):
+        """显示扫描进度对话框"""
+        if self._dedup_progress_dlg:
+            try:
+                self._dedup_progress_dlg.destroy()
+            except Exception:
+                pass
+
+        dlg = Toplevel(self.root)
+        dlg.title("查重扫描")
+        dlg.resizable(False, False)
+        dlg.configure(bg=COLOR_CARD)
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        # 居中
+        dlg.update_idletasks()
+        dw, dh = 400, 120
+        x = self.root.winfo_x() + (self.root.winfo_width() - dw) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - dh) // 2
+        dlg.geometry(f"{dw}x{dh}+{x}+{y}")
+
+        Label(dlg, text="🔍 正在扫描输出文件夹...", font=FONT_BOLD,
+              bg=COLOR_CARD, fg=COLOR_TEXT).pack(pady=(15, 10))
+
+        # 进度条
+        style = ttk.Style()
+        style.theme_use('default')
+        style.configure("Custom.Horizontal.TProgressbar",
+                     thickness=20, borderwidth=0)
+        pbar = ttk.Progressbar(dlg, maximum=total, value=0,
+                             mode='determinate', style="Custom.Horizontal.TProgressbar")
+        pbar.pack(fill=X, padx=30, pady=5)
+
+        self._scan_progress_var = StringVar(value=f"0 / {total}")
+        Label(dlg, textvariable=self._scan_progress_var, font=FONT_SMALL,
+              bg=COLOR_CARD, fg=COLOR_TEXT_SEC).pack()
+
+        self._dedup_progress_dlg = dlg
+        self._scan_pbar = pbar
+
+    def _bg_scan_worker(self, files_to_scan):
+        """后台扫描线程"""
+        total = len(files_to_scan)
+        scanned = 0
+        for full in files_to_scan:
+            try:
+                fsize = os.path.getsize(full)
+                fname = os.path.basename(full)
+                # 记录（文件名, 大小）作为查重依据
+                key = (fname, fsize)
+                if key not in self._dedup_hash_cache:
+                    self._dedup_hash_cache[key] = []
+                self._dedup_hash_cache[key].append(full)
+            except Exception:
+                pass
+
+            scanned += 1
+
+            # 每10个文件更新一次UI
+            if scanned % 10 == 0 or scanned == total:
+                self.root.after(0, lambda s=scanned, t=total: self._update_scan_progress(s, t))
+
+        # 扫描完成
+        self.root.after(0, self._close_scan_progress)
+
+    def _update_scan_progress(self, scanned, total):
+        """更新进度条"""
+        if self._scan_pbar:
+            self._scan_pbar['value'] = scanned
+        if self._scan_progress_var:
+            self._scan_progress_var.set(f"{scanned} / {total}")
+        if self._dedup_progress_dlg:
+            self._dedup_progress_dlg.update_idletasks()
+
+    def _close_scan_progress(self):
+        """关闭进度条对话框"""
+        self._dedup_hash_valid = True
+        self._dedup_scanning = False
+
+        if self._dedup_progress_dlg:
+            try:
+                self._dedup_progress_dlg.destroy()
+            except Exception:
+                pass
+            self._dedup_progress_dlg = None
+            self._scan_pbar = None
+
+        total = len(self._dedup_hash_cache)
+        self._flash_status(f"✅ 文件扫描完成，共 {total} 个唯一文件", duration=3000)
+
+    def _start_bg_scan(self):
+        """启动后台扫描"""
+        if not self._dedup_scanning:
+            self._scan_output_hashes()
+
+    def _check_duplicate(self, filepath):
+        """
+        检查当前文件是否已在输出文件夹中存在（文件名+大小匹配）
+        返回：None（不重复）或 {'dst_path': ...}
+        """
+        if not self.dedup_enabled.get():
+            return None
+
+        if not self._dedup_hash_valid:
+            self._scan_output_hashes()
+
+        try:
+            fsize = os.path.getsize(filepath)
+            fname = os.path.basename(filepath)
+            key = (fname, fsize)
+        except Exception:
+            return None
+
+        dup_paths = self._dedup_hash_cache.get(key, [])
+        if dup_paths:
+            return {'dst_path': dup_paths[0]}
+        return None
+
+    def _show_duplicate_dialog(self, filepath, dup_info):
+        """
+        弹出重复文件处理对话框
+        返回：'skip' / 'delete' / 'proceed'
+        """
+        filename = os.path.basename(filepath)
+        dst_name = os.path.basename(dup_info['dst_path'])
+
+        result = {'action': None}
+
+        dlg = Toplevel(self.root)
+        dlg.title("发现重复文件")
+        dlg.resizable(False, False)
+        dlg.configure(bg=COLOR_CARD)
+        dlg.grab_set()
+        dlg.transient(self.root)
+
+        # 居中显示
+        dlg.update_idletasks()
+        dw, dh = 420, 280
+        x = self.root.winfo_x() + (self.root.winfo_width() - dw) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - dh) // 2
+        dlg.geometry(f"{dw}x{dh}+{x}+{y}")
+
+        # 标题
+        Label(dlg, text="⚠️ 发现重复文件",
+              font=('Microsoft YaHei', 12, 'bold'),
+              bg=COLOR_CARD, fg=COLOR_WARNING).pack(pady=(18, 6))
+
+        # 文件信息
+        info_text = f"当前文件：{filename}\n已在输出文件夹中存在相同内容的文件：\n{dst_name}"
+        Label(dlg, text=info_text, font=FONT_SMALL,
+              bg=COLOR_CARD, fg=COLOR_TEXT, justify=LEFT).pack(padx=20, pady=(0, 10))
+
+        btn_frame = Frame(dlg, bg=COLOR_CARD)
+        btn_frame.pack(pady=(10, 0))
+
+        def on_skip():
+            result['action'] = 'skip'
+            dlg.destroy()
+
+        def on_delete():
+            result['action'] = 'delete'
+            dlg.destroy()
+
+        def on_proceed():
+            result['action'] = 'proceed'
+            dlg.destroy()
+
+        def on_disable():
+            result['action'] = 'disable'
+            dlg.destroy()
+
+        Button(btn_frame, text="跳过此文件", command=on_skip,
+               bg=COLOR_BTN_ALT, fg='white', font=FONT_BOLD,
+               padx=12, pady=5, bd=0, cursor='hand2').pack(side=LEFT, padx=4)
+        _bind_hover(btn_frame.winfo_children()[-1], COLOR_BTN_ALT, '#4b5563')
+
+        Button(btn_frame, text="删除此文件", command=on_delete,
+               bg=COLOR_DANGER, fg='white', font=FONT_BOLD,
+               padx=12, pady=5, bd=0, cursor='hand2').pack(side=LEFT, padx=4)
+        _bind_hover(btn_frame.winfo_children()[-1], COLOR_DANGER, '#dc2626')
+
+        Button(btn_frame, text="仍然分类", command=on_proceed,
+               bg=COLOR_SUCCESS, fg='white', font=FONT_BOLD,
+               padx=12, pady=5, bd=0, cursor='hand2').pack(side=LEFT, padx=4)
+        _bind_hover(btn_frame.winfo_children()[-1], COLOR_SUCCESS, '#059669')
+
+        # 禁用查重按钮
+        disable_frame = Frame(dlg, bg=COLOR_CARD)
+        disable_frame.pack(pady=(12, 0))
+        Button(disable_frame, text="本次不再提醒", command=on_disable,
+               font=FONT_SMALL, bg='#e5e7eb', fg=COLOR_TEXT,
+               padx=10, pady=3, bd=0, cursor='hand2').pack()
+        _bind_hover(disable_frame.winfo_children()[-1], '#e5e7eb', '#d1d5db')
+
+        dlg.protocol("WM_DELETE_WINDOW", on_proceed)  # 关闭窗口默认继续分类
+        self.root.wait_window(dlg)
+
+        action = result['action']
+        if action == 'disable':
+            self.dedup_enabled.set(False)
+            return 'proceed'
+        return action if action else 'proceed'
+
+    def _show_dedup_settings(self):
+        """查重设置对话框"""
+        dlg = Toplevel(self.root)
+        dlg.title("查重设置")
+        dlg.resizable(False, False)
+        dlg.configure(bg=COLOR_CARD)
+        dlg.grab_set()
+        dlg.transient(self.root)
+
+        # 居中
+        dlg.update_idletasks()
+        dw, dh = 360, 240
+        x = self.root.winfo_x() + (self.root.winfo_width() - dw) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - dh) // 2
+        dlg.geometry(f"{dw}x{dh}+{x}+{y}")
+
+        Label(dlg, text="🔍 查重设置",
+              font=('Microsoft YaHei', 12, 'bold'),
+              bg=COLOR_CARD, fg=COLOR_TEXT).pack(pady=(18, 10))
+
+        # 启用查重
+        Checkbutton(dlg, text="启用查重（检测已在输出文件夹中的重复文件）",
+                    variable=self.dedup_enabled,
+                    bg=COLOR_CARD, activebackground=COLOR_CARD,
+                    fg=COLOR_TEXT, selectcolor=COLOR_ACCENT,
+                    font=FONT_NORMAL, command=self._on_dedup_toggle).pack(anchor='w', padx=20, pady=(0, 10))
+
+        # 处理方式
+        mode_frame = Frame(dlg, bg=COLOR_CARD)
+        mode_frame.pack(anchor='w', padx=20, pady=(0, 10))
+        Label(mode_frame, text="重复时操作：", font=FONT_BOLD,
+              bg=COLOR_CARD, fg=COLOR_TEXT).pack(side=LEFT)
+
+        for txt, val in [("自动跳过", "skip"), ("自动删除", "delete"), ("每次询问", "ask")]:
+            Radiobutton(mode_frame, text=txt, variable=self.dedup_mode,
+                        value=val, bg=COLOR_CARD,
+                        activebackground=COLOR_CARD,
+                        fg=COLOR_TEXT, selectcolor=COLOR_ACCENT,
+                        font=FONT_SMALL).pack(side=LEFT, padx=6)
+
+        # 扫描按钮
+        btn_frame = Frame(dlg, bg=COLOR_CARD)
+        btn_frame.pack(pady=(10, 0))
+        Button(btn_frame, text="立即扫描输出文件夹",
+               command=lambda: [dlg.destroy(), self._manual_scan_dedup()],
+               bg=COLOR_BTN, fg='white', font=FONT_BOLD,
+               padx=12, pady=5, bd=0, cursor='hand2').pack(side=LEFT, padx=6)
+        _bind_hover(btn_frame.winfo_children()[-1], COLOR_BTN, '#2563eb')
+
+        Button(btn_frame, text="关闭", command=dlg.destroy,
+               bg=COLOR_BTN_ALT, fg='white', font=FONT_BOLD,
+               padx=12, pady=5, bd=0, cursor='hand2').pack(side=LEFT, padx=6)
+        _bind_hover(btn_frame.winfo_children()[-1], COLOR_BTN_ALT, '#4b5563')
+
+        dlg.wait_window(dlg)
+        self.save_config()
+
+    def _on_dedup_toggle(self):
+        """启用/禁用查重时触发"""
+        if self.dedup_enabled.get():
+            self._dedup_hash_valid = False  # 启用时标记缓存需要刷新
+            self._flash_status("🔍 查重已启用，下次分类时将扫描输出文件夹", duration=2000)
+        else:
+            self._flash_status("查重已禁用", duration=2000)
+
+    def _manual_scan_dedup(self):
+        """手动触发哈希扫描"""
+        self._dedup_hash_valid = False
+        self._scan_output_hashes()
 
     def _get_file_datetime(self, filepath):
         """
@@ -1529,28 +1967,28 @@ class Phoo:
             return None
 
     def _get_file_type_label(self, filepath):
-        """返回文件类型的中文标签"""
+        """返回文件类型的 emoji + 中文标签"""
         ext = os.path.splitext(filepath)[1].lower()
         if ext in self.vid_ext:
-            return "视频"
+            return "🎬 视频"
         elif ext in self.swf_ext:
-            return "Flash"
+            return "🔦 Flash"
         elif ext in ('.jpg', '.jpeg'):
-            return "图片 JPEG"
+            return "🖼️ JPEG"
         elif ext == '.png':
-            return "图片 PNG"
+            return "🖼️ PNG"
         elif ext == '.gif':
-            return "图片 GIF"
+            return "🖼️ GIF"
         elif ext == '.bmp':
-            return "图片 BMP"
+            return "🖼️ BMP"
         elif ext in ('.tiff', '.tif'):
-            return "图片 TIFF"
+            return "🖼️ TIFF"
         elif ext == '.ico':
-            return "图标 ICO"
+            return "🔖 ICO"
         elif ext == '.heic':
-            return "图片 HEIC"
+            return "🖼️ HEIC"
         else:
-            return f"文件 {ext}"
+            return f"📄 {ext}"
 
     def show_current(self):
         # ── 停止上一次动图播放 ──
@@ -1597,8 +2035,11 @@ class Phoo:
                         video_path = self._extract_embedded_video(f)
                         if video_path:
                             self._motion_temp_file = video_path
+                        else:
+                            self._flash_status("⚠️ 动图视频提取失败", duration=3000)
                     if video_path:
-                        self._start_motion_playback(video_path)
+                        seek_us = motion.get('presentation_us')
+                        self._start_motion_playback(video_path, seek_us=seek_us)
             except Exception as e:
                 self.img_label.config(text=f"无法加载图片：{e}", fg='red')
 
@@ -1608,6 +2049,43 @@ class Phoo:
 
         # ── 更新右上角信息标签 ──
         self._update_info_label(f)
+
+        # ── 更新左上角类型标签 ──
+        self._type_label.config(text=self._get_file_type_label(f))
+
+        # ── 异步查重检查（不阻塞UI）──
+        if self.dedup_enabled.get():
+            self.root.after(50, lambda: self._async_check_duplicate(f))
+
+    def _async_check_duplicate(self, filepath):
+        """异步检查当前文件是否在输出文件夹中存在（文件名+大小匹配）"""
+        if not self.dedup_enabled.get():
+            return
+
+        # 如果缓存无效，后台扫描
+        if not self._dedup_hash_valid:
+            if not self._dedup_scanning:
+                self.root.after(100, self._start_bg_scan)
+            self._dup_label.config(text="🔄 扫描中...", fg=COLOR_TEXT_SEC)
+            return
+
+        # 文件名 + 大小匹配
+        try:
+            fsize = os.path.getsize(filepath)
+            fname = os.path.basename(filepath)
+            key = (fname, fsize)
+        except Exception:
+            return
+
+        # 查找相同文件名+大小的文件
+        dup_paths = self._dedup_hash_cache.get(key, [])
+        if dup_paths:
+            self._dup_label.config(
+                text=f"⚠️ 重复: {os.path.basename(dup_paths[0])}",
+                fg=COLOR_DANGER)
+            return
+
+        self._dup_label.config(text="✅ 未重复", fg=COLOR_SUCCESS)
 
     def _get_video_info(self, filepath):
         """读取视频元数据，返回结构化字典（分辨率/帧率/时长/总帧数）"""
@@ -1678,7 +2156,6 @@ class Phoo:
 
     def _build_info_lines(self, filepath):
         """构建预览区右上角的信息行，根据 _info_expanded 返回简洁或完整内容"""
-        type_str = self._get_file_type_label(filepath)
         date_str = self._get_file_datetime(filepath)
         ext = os.path.splitext(filepath)[1].lower()
 
@@ -1725,11 +2202,14 @@ class Phoo:
 
         # ── 动图检测 ──
         motion = self._detect_motion_photo(filepath) if ext in self.img_ext else None
+        motion_str = ""
         if motion:
             motion_labels = {'apple': '🎬 Live Photo', 'android': '🎬 Motion Photo', 'vivo': '🎬 动图'}
-            type_str = f"{type_str} {motion_labels.get(motion['type'], '🎬 动图')}"
+            motion_str = motion_labels.get(motion['type'], '🎬 动图')
 
-        lines = [type_str]
+        lines = []
+        if motion_str:
+            lines.append(motion_str)
         if date_str:
             lines.append(f"{self._shorten_date(date_str)} {date_note}".strip())
 
@@ -1897,7 +2377,8 @@ class Phoo:
 
     def _detect_motion_photo(self, filepath):
         """检测动图，返回 dict 或 None。
-        返回格式: {'type': 'apple'|'android'|'vivo', 'video_path': ...} 或 {'type': 'android', 'embedded': True}
+        返回格式: {'type': 'apple'|'android'|'vivo', 'video_path': ...}
+                  或 {'type': 'android', 'embedded': True, 'presentation_us': int|None}
         """
         base, ext = os.path.splitext(filepath)
         ext_lower = ext.lower()
@@ -1918,25 +2399,46 @@ class Phoo:
                     xmp_data = self._extract_xmp_binary(filepath)
                 if xmp_data:
                     is_motion = False
+                    presentation_us = None
+                    # bytes -> str（Pillow JPEG XMP 可能返回 bytes）
+                    if isinstance(xmp_data, bytes):
+                        xmp_data = xmp_data.decode('utf-8', errors='ignore')
+                    # 解析 PresentationTimestampUs（照片时刻在视频中的位置）
+                    m_ts = re.search(
+                        r'GCamera:MotionPhotoPresentationTimestampUs=["\']?(\d+)',
+                        xmp_data)
+                    if m_ts:
+                        presentation_us = int(m_ts.group(1))
                     try:
                         root = ET.fromstring(xmp_data)
                         for elem in root.iter():
-                            tag = elem.tag
-                            if 'MotionPhoto' in tag:
-                                if elem.text and elem.text.strip() == '1':
+                            # 同时检查 tag 和 attrib（小米等设备将 MotionPhoto=1 放在 rdf:Description 属性中）
+                            if 'MotionPhoto' in elem.tag or 'MotionPhoto' in ' '.join(elem.attrib):
+                                val = elem.text
+                                if val is None or not val.strip():
+                                    val = elem.attrib.get(
+                                        '{http://ns.google.com/photos/1.0/camera/}MotionPhoto')
+                                if val and val.strip() == '1':
                                     is_motion = True
                                     break
-                            if 'MicroVideo' in tag:
-                                if elem.text and elem.text.strip() == '1':
+                            if 'MicroVideo' in elem.tag or 'MicroVideo' in ' '.join(elem.attrib):
+                                val = elem.text
+                                if val is None or not val.strip():
+                                    val = elem.attrib.get(
+                                        '{http://ns.google.com/photos/1.0/camera/}MicroVideo')
+                                if val and val.strip() == '1':
                                     is_motion = True
                                     break
                     except ET.ParseError:
-                        # XMP 解析失败，用字符串搜索兜底
+                        pass
+                    # 字符串搜索兜底（无论 ET 是否成功）
+                    if not is_motion:
                         if 'MotionPhoto="1"' in xmp_data or 'MotionPhoto=1' in xmp_data \
                            or 'MicroVideo="1"' in xmp_data or 'MicroVideo=1' in xmp_data:
                             is_motion = True
                     if is_motion:
-                        return {'type': 'android', 'embedded': True}
+                        return {'type': 'android', 'embedded': True,
+                                'presentation_us': presentation_us}
             except Exception:
                 pass
 
@@ -1979,30 +2481,49 @@ class Phoo:
     def _extract_embedded_video(self, filepath):
         """从 Android Motion Photo 的 JPEG 文件中提取嵌入的视频，返回临时文件路径"""
         try:
+            file_size = os.path.getsize(filepath)
+
+            # ── 方案1：从 XMP Container Directory 解析 Item:Length ──
+            xmp = self._extract_xmp_binary(filepath)
+            if xmp:
+                # 搜索 MotionPhoto 条目的 Length（属性顺序可能不同）
+                m = re.search(
+                    r'Item:Semantic="MotionPhoto"[^>]*?Item:Length="(\d+)"', xmp)
+                if not m:
+                    m = re.search(
+                        r'Item:Length="(\d+)"[^>]*?Item:Semantic="MotionPhoto"', xmp)
+                if m:
+                    length = int(m.group(1))
+                    video_start = file_size - length
+                    if video_start > 0 and video_start < file_size:
+                        with open(filepath, 'rb') as f:
+                            f.seek(video_start)
+                            video_data = f.read()
+                        if b'ftyp' in video_data[:32]:
+                            tmp = tempfile.NamedTemporaryFile(
+                                suffix='.mp4', delete=False)
+                            tmp.write(video_data)
+                            tmp.close()
+                            return tmp.name
+
+            # ── 方案2（回退）：rfind(FFD9) + Samsung footer ──
             with open(filepath, 'rb') as f:
                 data = f.read()
 
-            # 找到 JPEG EOF marker (FFD9) — 取最后一个（有些 JPEG 有缩略图 EOI）
             eof_pos = data.rfind(b'\xff\xd9')
             if eof_pos == -1:
                 return None
             video_start = eof_pos + 2
-
             if video_start >= len(data):
                 return None
-
             video_data = data[video_start:]
 
-            # 检查 Samsung MotionPhoto_Data footer（末尾可能有 16 字节标记）
-            # 格式: "MotionPhoto_Data\0" (16 bytes)
             samsung_footer = b'MotionPhoto_Data\x00'
             samsung_pos = video_data.find(samsung_footer)
             if samsung_pos > 0:
                 video_data = video_data[:samsung_pos]
 
-            # 验证视频数据以 ftyp 开头（MP4/MOV 容器）
-            if not video_data.startswith(b'\x00\x00\x00') and \
-               b'ftyp' not in video_data[:32]:
+            if b'ftyp' not in video_data[:32]:
                 return None
 
             tmp = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False)
@@ -2013,15 +2534,23 @@ class Phoo:
             return None
 
     # ── 动图自动播放 ──────────────────────────────────────────
-    def _start_motion_playback(self, video_path):
-        """开始播放动图视频（循环）"""
+    def _start_motion_playback(self, video_path, seek_us=None):
+        """开始播放动图视频（循环），seek_us 为起始微秒偏移"""
         if not HAS_CV2:
+            self._flash_status("⚠️ 需要安装 opencv-python 才能播放动图", duration=3000)
             return
         self._stop_motion_playback()
         try:
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
+                self._flash_status("⚠️ 无法打开动图视频", duration=3000)
                 return
+            # 从照片时刻开始播放（MotionPhotoPresentationTimestampUs）
+            if seek_us and seek_us > 0:
+                fps = cap.get(cv2.CAP_PROP_FPS) or 30
+                seek_frame = int(seek_us / 1_000_000 * fps)
+                if seek_frame > 0:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, seek_frame)
             self._motion_cap = cap
             self._motion_playing = True
             self._motion_next_frame()
@@ -2098,6 +2627,9 @@ class Phoo:
         if not motion or not motion.get('video_path'):
             return
         paired_src = motion['video_path']
+        # ── 检查是否已存在对同一源文件的操作 ──
+        if any(a.get('src') == paired_src for a in self.pending_actions):
+            return  # 已有操作，跳过
         paired_name = os.path.basename(paired_src)
         paired_dst = os.path.join(dest_folder, paired_name)
         # 处理目标重名
@@ -2116,6 +2648,9 @@ class Phoo:
         if not motion or not motion.get('video_path'):
             return
         paired_src = motion['video_path']
+        # ── 检查是否已存在对同一源文件的操作 ──
+        if any(a.get('src') == paired_src for a in self.pending_actions):
+            return  # 已有操作，跳过
         self.pending_actions.append({
             'action': 'delete', 'src': paired_src, 'dst': None, 'idx': None
         })
@@ -2353,6 +2888,10 @@ class Phoo:
         failed = 0
         errors = []
         for act in list(self.pending_actions):
+            if not os.path.exists(act['src']):
+                failed += 1
+                errors.append(f"{os.path.basename(act['src'])}：文件不存在或已被删除")
+                continue
             try:
                 rotation = act.get('rotation', 0)
                 if rotation and rotation % 360 != 0 and act.get('dst'):
@@ -2438,6 +2977,9 @@ class Phoo:
             'folder_count':   self.folder_count_var.get(),
             'hotkeys':        self.hotkeys,
             'output_folders': [fo["path"].get() for fo in self.output_folders],
+            # ── 查重设置 ──
+            'dedup_enabled': self.dedup_enabled.get(),
+            'dedup_mode':    self.dedup_mode.get(),
             # ── 进度断点 ──
             'last_ptr':       self.ptr,
             'last_anchor':    anchor,
@@ -2468,6 +3010,9 @@ class Phoo:
                 for i, p in enumerate(cfg.get('output_folders', [])):
                     if i < MAX_FOLDERS:
                         self.output_folders[i]["path"].set(p)
+                # ── 恢复查重设置 ──
+                self.dedup_enabled.set(cfg.get('dedup_enabled', False))
+                self.dedup_mode.set(cfg.get('dedup_mode', 'skip'))
                 # ── 恢复进度断点 ──
                 self._saved_ptr    = cfg.get('last_ptr', 0)
                 self._saved_anchor = cfg.get('last_anchor', None)
@@ -2494,6 +3039,58 @@ class Phoo:
                 self.out_entries[idx].set(d)
             self.save_config()
             self.update_display()
+
+    def _global_create_subfolder(self):
+        """选择已有文件夹作为分类仓库，默认打开输入路径的父目录"""
+        input_path = self.input_folder.get()
+        initial_dir = os.path.dirname(input_path) if input_path and os.path.isdir(input_path) else ""
+
+        new_path = filedialog.askdirectory(
+            parent=self.root,
+            title="选择分类文件夹",
+            initialdir=initial_dir if initial_dir else None
+        )
+        if not new_path:
+            return
+
+        n = self.folder_count_var.get()
+
+        # 找第一个空槽位
+        target_idx = None
+        for i in range(n):
+            if not self.output_folders[i]["path"].get().strip():
+                target_idx = i
+                break
+
+        # 所有槽位都有路径，自动增加一个
+        if target_idx is None:
+            target_idx = n
+            self.folder_count_var.set(n + 1)
+            self._on_folder_count_change()
+
+        self.output_folders[target_idx]["path"].set(new_path)
+        if target_idx < len(self.out_entries):
+            self.out_entries[target_idx].set(new_path)
+        self.save_config()
+        self.update_display()
+
+    def remove_folder(self, idx):
+        """删除指定分类槽位（后续槽位前移，不删除磁盘文件）"""
+        n = self.folder_count_var.get()
+        if n <= 2:
+            return  # 最少保留 2 个
+
+        # 后续槽位路径依次前移
+        for i in range(idx, n - 1):
+            self.output_folders[i]["path"].set(
+                self.output_folders[i + 1]["path"].get()
+            )
+        # 清空最后一个槽位
+        self.output_folders[n - 1]["path"].set("")
+
+        # 减少数量并刷新 UI
+        self.folder_count_var.set(n - 1)
+        self._on_folder_count_change()
 
     def quick_create_folder(self, idx):
         """在输入文件夹同级目录下快速创建新的分类文件夹"""
