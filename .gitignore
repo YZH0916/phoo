@@ -31,5 +31,6 @@ env/
 *.swp
 *.swo
 
-# Local config (not for GitHub)
+# WorkBuddy local data (not for GitHub)
+.workbuddy/
 phoo_config.json
