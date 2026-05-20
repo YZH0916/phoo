@@ -4,6 +4,20 @@
 
 > 只需按一下键盘，文件就分类好了！
 
+## 关于 Phoo
+
+Phoo 最初是受到 **Slidebox**（早期 Android/iOS 上的经典图片管理 App）的启发——用最少的操作完成文件分类。
+
+本项目 fork 并大幅重构自 [ASD-image-classifier-Python](https://github.com/RxinnotRstar/ASD-image-classifier-Python)，在原版基础上增加了诸多实用功能：
+- 动态照片（Motion Photo/Live Photo）支持
+- 文件查重、日期自动修正
+- 现代化 UI 改进
+- 等等...
+
+**⚠️ 免责声明**：本项目是纯 vibe coding（即兴编程）的产物，作为程序员的第一个正式项目，代码中难免有诸多外行之处，还请多多包涵，欢迎 Issue 和 PR！
+
+---
+
 Phoo 是一个基于 Python 的文件分类工具，通过快捷键将图片、视频、Flash 文件快速归入对应文件夹，大幅提升整理效率。
 
 ## 功能特点
@@ -97,6 +111,10 @@ pyinstaller --onefile --windowed phoo.py
 
 [MIT License](LICENSE)
 
-## 致谢
+## 灵感与致谢
 
-本项目原始版本由 [RxinnotRstar](https://github.com/RxinnotRstar) 创建，当前版本由 [YZH0916](https://github.com/YZH0916) 维护和增强。
+- **Slidebox**：项目最初的灵感来源
+- **[RxinnotRstar](https://github.com/RxinnotRstar)**：感谢提供的原始框架和思路，参见 [ASD-image-classifier-Python](https://github.com/RxinnotRstar/ASD-image-classifier-Python)
+- **[YZH0916](https://github.com/YZH0916)**：现任维护者
+
+⚠️ 作为非科班出身的第一个项目，代码质量和使用体验方面难免有诸多不足，如有建议欢迎提出！

@@ -4,6 +4,20 @@
 
 > Just press a key and your files are sorted!
 
+## About Phoo
+
+Phoo was originally **inspired by Slidebox** - the classic image management app on early Android/iOS - aiming to classify files with minimal effort.
+
+This project is a fork and major refactoring of [ASD-image-classifier-Python](https://github.com/RxinnotRstar/ASD-image-classifier-Python), with many new features added:
+- Motion Photo / Live Photo support
+- File deduplication & automatic date correction
+- Modernized UI improvements
+- And more...
+
+**⚠️ Disclaimer**: This project was built purely through vibe coding (improvised coding). As my first formal project as a non-CS background developer, there might be plenty of rookie mistakes. Please bear with me - Issues and PRs are welcome!
+
+---
+
 Phoo is a Python-based file classification tool. Press keyboard shortcuts to instantly sort images, videos, and Flash files into corresponding folders.
 
 ## Features
@@ -78,6 +92,10 @@ The EXE file is generated in the `dist/` directory.
 
 [MIT License](LICENSE)
 
-## Credits
+## Inspiration & Credits
 
-Original project by [RxinnotRstar](https://github.com/RxinnotRstar). Maintained and enhanced by [YZH0916](https://github.com/YZH0916).
+- **Slidebox**: The original inspiration for this project
+- **[RxinnotRstar](https://github.com/RxinnotRstar)**: Thank you for the original framework, see [ASD-image-classifier-Python](https://github.com/RxinnotRstar/ASD-image-classifier-Python)
+- **[YZH0916](https://github.com/YZH0916)**: Current maintainer
+
+⚠️ As my first formal project with a non-CS background, there might be plenty of rookie mistakes. Please bear with me!
