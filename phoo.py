@@ -116,7 +116,7 @@ except ImportError:
     cv2 = None
     HAS_CV2 = False
 
-__version__ = "2.2.6"
+__version__ = "2.2.8"
 
 # ── 默认快捷键配置（最多支持 MAX_FOLDERS 个文件夹）──
 MAX_FOLDERS = 9
@@ -423,39 +423,9 @@ class Phoo:
         self.root = root
         self.root.title(f"图片分类工具 v{__version__}")
         
-        self.windowed_height_ratio = 0.75
-        self.windowed_geometry_set = False
-        
-        if sys.platform == 'win32':
-            try:
-                import ctypes
-                ctypes.windll.shcore.SetProcessDpiAwareness(1)
-            except:
-                pass
-            self.root.state('zoomed')
-        
-        elif sys.platform == 'darwin':
-            root.geometry('%dx%d+%d+%d' % (root.winfo_screenwidth(), root.winfo_screenheight(), 0, 0))
-        
-        else:
-            if root.winfo_screenwidth() > 1920:
-                root.tk.call('tk', 'scaling', 1.5)
-            root.attributes('-zoomed', True)
-        
-        import tkinter.font as tkfont
-        self.default_font = tkfont.nametofont("TkDefaultFont")
-        self.default_font.configure(size=11)
-        self.root.option_add("*Font", self.default_font)
-        self.root.configure(bg=COLOR_BG)
-        # ttk 样式（Combobox 等）
-        self._ttk_style = ttk.Style()
-        self._ttk_style.configure('TCombobox', font=FONT_NORMAL)
-        self._ttk_style.map('TCombobox',
-            fieldbackground=[('readonly', 'white')],
-            selectbackground=[('readonly', '#dbeafe')])
-
         self.config_file = "phoo_config.json"
 
+        # ── 所有变量必须在 load_config 之前定义 ──
         self.input_folder   = StringVar()
         self.inc_subfolders = BooleanVar(value=False)
         self.sort_method    = StringVar(value="name")
@@ -473,6 +443,32 @@ class Phoo:
         ]
         # 自定义快捷键列表
         self.hotkeys = list(DEFAULT_KEYS)
+
+        # ── 加载配置（在所有变量创建之后）──
+        self.load_config()
+
+        # ── 窗口几何信息（需在 load_config 之后）──
+        saved_geometry = getattr(self, '_saved_geometry', '')
+        if saved_geometry:
+            try:
+                self.root.geometry(saved_geometry)
+            except:
+                self.root.geometry('1200x800')
+        else:
+            self.root.geometry('1200x800')
+        self.root.resizable(True, True)
+
+        import tkinter.font as tkfont
+        self.default_font = tkfont.nametofont("TkDefaultFont")
+        self.default_font.configure(size=11)
+        self.root.option_add("*Font", self.default_font)
+        self.root.configure(bg=COLOR_BG)
+        # ttk 样式
+        self._ttk_style = ttk.Style()
+        self._ttk_style.configure('TCombobox', font=FONT_NORMAL)
+        self._ttk_style.map('TCombobox',
+            fieldbackground=[('readonly', 'white')],
+            selectbackground=[('readonly', '#dbeafe')])
 
         self.all_images = []
         self.ptr = 0
@@ -514,7 +510,6 @@ class Phoo:
         self._dedup_scan_thread = None       # 扫描线程引用
         self._dedup_progress_dlg = None    # 扫描进度对话框
 
-        self.load_config()
         self.build_ui()
         self.root.after(100, lambda: self.root.focus_force())
         if self.input_folder.get() and os.path.exists(self.input_folder.get()):
@@ -628,14 +623,14 @@ class Phoo:
             command=self._on_folder_count_change)
         self._count_spinbox.pack(side=LEFT, padx=(0, SPACE_MD))
 
-        btn_new_sub = Button(line3, text="✚ 新建子文件夹",
+        btn_new_sub = Button(line3, text="✚ 新建分类",
                command=self._global_create_subfolder,
                bg=COLOR_SUCCESS, fg='white', font=FONT_BOLD,
                padx=8, pady=3, bd=0, cursor='hand2')
         btn_new_sub.pack(side=LEFT, padx=(0, SPACE_XS))
         _bind_hover(btn_new_sub, COLOR_SUCCESS, '#059669')
 
-        btn_keys = Button(line3, text="⌨ 自定义快捷键",
+        btn_keys = Button(line3, text="⌨ 自定义",
                command=self._open_keybind_dialog,
                bg=COLOR_BTN_ALT, fg=COLOR_BTN_FG, font=FONT_BOLD,
                padx=10, pady=3, bd=0, cursor='hand2')
@@ -667,6 +662,13 @@ class Phoo:
         self.img_label = Label(self.img_frame, bg=COLOR_CARD, anchor=CENTER)
         self.img_label.pack(fill=BOTH, expand=True)
         self.img_label.bind("<Double-Button-1>", self.open_current_file)
+
+        # ── 预览区内底部：文件名显示（覆盖在素材上）──
+        self._filename_label = Label(
+            self.img_frame, text="", anchor=S,
+            bg=COLOR_CARD, fg=COLOR_TEXT_WEAK,
+            font=FONT_SMALL, padx=SPACE_SM, pady=SPACE_XS)
+        self._filename_label.place(relx=0.5, rely=1.0, anchor=S, y=-4)
 
         # ── 预览区右上角：文件类型 + 拍摄日期 + 扩展元数据 ──
         self._info_expanded = False  # 是否展开完整元数据
@@ -759,7 +761,27 @@ class Phoo:
         # ── 绑定快捷键 ──
         self._bind_hotkeys()
 
+        # ── 窗口大小变化时自动缩放图片 ──
+        self._resize_job = None  # 节流定时器
+        self.root.bind('<Configure>', self._on_window_resize)
+
         self.update_display()
+
+    def _on_window_resize(self, event):
+        """窗口大小变化时自动重新缩放图片"""
+        # 忽略非窗口事件（如子控件）
+        if event.widget != self.root:
+            return
+        # 取消之前的定时器
+        if self._resize_job:
+            self.root.after_cancel(self._resize_job)
+        # 延迟执行（节流），避免频繁触发
+        self._resize_job = self.root.after(150, self._reload_current_image)
+
+    def _reload_current_image(self):
+        """重新加载并显示当前图片（用于窗口大小变化后自适应）"""
+        if self.all_images and self.ptr < len(self.all_images):
+            self.show_current()
 
     def _open_folder_by_idx(self, idx):
         """通过索引打开对应的输出文件夹"""
@@ -2053,6 +2075,9 @@ class Phoo:
         # ── 更新左上角类型标签 ──
         self._type_label.config(text=self._get_file_type_label(f))
 
+        # ── 更新底部文件名显示 ──
+        self._filename_label.config(text=os.path.basename(f))
+
         # ── 异步查重检查（不阻塞UI）──
         if self.dedup_enabled.get():
             self.root.after(50, lambda: self._async_check_duplicate(f))
@@ -2983,6 +3008,8 @@ class Phoo:
             # ── 进度断点 ──
             'last_ptr':       self.ptr,
             'last_anchor':    anchor,
+            # ── 窗口几何信息 ──
+            'window_geometry': self.root.geometry(),
         }
         try:
             with open(self.config_file, 'w', encoding='utf-8') as f:
@@ -3016,6 +3043,8 @@ class Phoo:
                 # ── 恢复进度断点 ──
                 self._saved_ptr    = cfg.get('last_ptr', 0)
                 self._saved_anchor = cfg.get('last_anchor', None)
+                # ── 恢复窗口几何信息 ──
+                self._saved_geometry = cfg.get('window_geometry', '')
         except:
             print("配置文件丢失或损坏，已恢复默认设置。")
 
