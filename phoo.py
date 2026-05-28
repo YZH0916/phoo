@@ -123,7 +123,7 @@ except ImportError:
     cv2 = None
     HAS_CV2 = False
 
-__version__ = "2.3.0"
+__version__ = "2.3.1"
 
 # ── 默认快捷键配置（最多支持 MAX_FOLDERS 个文件夹）──
 MAX_FOLDERS = 9
@@ -1013,11 +1013,11 @@ class Phoo:
                     if os.path.isfile(full):
                         all_files.append(full)
 
-        # ── 排除 Live Photo 配对的 .mov 文件（与 .heic/.jpg/.jpeg 同名） ──
+        # ── 排除 Live Photo 配对的 .mov 文件（与 .heic/.jpg/.livp 等同名） ──
         img_basenames = set()
         for fp in all_files:
             ext = os.path.splitext(fp)[1].lower()
-            if ext in ('.heic', '.jpg', '.jpeg', '.png', '.tiff', '.bmp'):
+            if ext in ('.heic', '.jpg', '.jpeg', '.png', '.tiff', '.bmp', '.livp'):
                 img_basenames.add(os.path.splitext(fp)[0].lower())
 
         for fp in all_files:
@@ -2766,12 +2766,23 @@ class Phoo:
             return None
 
     # ── 动图自动播放 ──────────────────────────────────────────
-    def _start_motion_playback(self, video_path, seek_us=None):
-        """开始播放动图视频（循环），seek_us 为起始微秒偏移"""
+    def _start_motion_playback(self, video_path, seek_us=None, keep_livp=False):
+        """开始播放动图视频（循环），seek_us 为起始微秒偏移
+        keep_livp=True 时不销毁 .livp 悬停状态（Leave 事件保持绑定，离开可恢复静态图）"""
         if not HAS_CV2:
             self._flash_status("⚠️ 需要安装 opencv-python 才能播放动图", duration=3000)
             return
-        self._stop_motion_playback()
+        if keep_livp:
+            # ── 仅清理动图播放状态，保留 .livp 悬停绑定 ──
+            self._motion_playing = False
+            if self._motion_after_id is not None:
+                self.root.after_cancel(self._motion_after_id)
+                self._motion_after_id = None
+            if self._motion_cap is not None:
+                self._motion_cap.release()
+                self._motion_cap = None
+        else:
+            self._stop_motion_playback()
         try:
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
@@ -2901,10 +2912,10 @@ class Phoo:
             self._display_image(self._livp_static_img)
 
     def _livp_start_play(self):
-        """悬停 0.2s 后触发：开始播放 .livp 内嵌视频"""
+        """悬停 0.2s 后触发：开始播放 .livp 内嵌视频（保持 livp 悬停状态）"""
         self._livp_hover_after = None
         if self._livp_video_path and HAS_CV2:
-            self._start_motion_playback(self._livp_video_path, seek_us=None)
+            self._start_motion_playback(self._livp_video_path, seek_us=None, keep_livp=True)
 
     def _add_paired_action(self, src_image, dest_folder, action):
         """联动移动/复制配对文件（Live Photo .mov / vivo .mp4）到 pending_actions"""
