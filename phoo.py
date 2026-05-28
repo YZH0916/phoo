@@ -123,7 +123,7 @@ except ImportError:
     cv2 = None
     HAS_CV2 = False
 
-__version__ = "2.2.9"
+__version__ = "2.3.0"
 
 # ── 默认快捷键配置（最多支持 MAX_FOLDERS 个文件夹）──
 MAX_FOLDERS = 9
@@ -491,6 +491,11 @@ class Phoo:
         self._motion_after_id = None   # after() 定时器 ID
         self._motion_cap = None        # OpenCV VideoCapture 对象
         self._motion_temp_file = None  # 嵌入视频提取后的临时文件路径
+
+        # ── .livp 悬停播放状态 ──
+        self._livp_hover_after = None   # 悬停定时器 ID（0.2s 延迟）
+        self._livp_static_img = None    # 当前 .livp 的静态 PIL Image（用于恢复）
+        self._livp_video_path = None    # 当前 .livp 解压出的 MOV 临时路径
 
         # ── 旋转状态 ──
         self._current_rotation = 0     # 当前旋转角度（90 的倍数）
@@ -2058,28 +2063,33 @@ class Phoo:
                 text=f"Flash 文件：{os.path.basename(f)}\n双击此处用默认程序打开",
                 fg='#1a5fb4', font=FONT_NORMAL, bg='white')
         elif ext in self.livp_ext:
-            # ── .livp 实况照片：用 LivpFile 提取图片预览 ──
+            # ── .livp 实况照片：默认显示静态图，悬停 0.2s 后播放视频 ──
             if HAS_LIVP:
                 try:
                     livp = LivpFile(f)
                     img = livp.image_pil()
+                    self._livp_static_img = img   # 保存静态图供恢复用
                     self._display_image(img)
 
-                    # 如果有 cv2，用内置 MOV 视频自动播放
+                    # 预先解压 MOV 到临时文件（若有 cv2）
+                    self._livp_video_path = None
                     if HAS_CV2:
-                        import io, tempfile
                         vid_bytes = None
                         try:
                             vid_bytes = livp.video_bytes()
                         except Exception:
                             pass
                         if vid_bytes:
-                            tmp = tempfile.NamedTemporaryFile(
-                                delete=False, suffix='.mov')
+                            import tempfile as _tf
+                            tmp = _tf.NamedTemporaryFile(delete=False, suffix='.mov')
                             tmp.write(vid_bytes)
                             tmp.close()
-                            self._motion_temp_file = tmp.name
-                            self._start_motion_playback(tmp.name, seek_us=None)
+                            self._livp_video_path = tmp.name
+                            self._motion_temp_file = tmp.name  # 交给 _stop_motion_playback 清理
+
+                    # 绑定悬停事件
+                    self._bind_livp_hover()
+
                 except Exception as e:
                     self.img_label.config(
                         text=f"无法加载 .livp：{e}",
@@ -2278,17 +2288,110 @@ class Phoo:
         exif_info = self._get_exif_data(filepath)
         video_info = self._get_video_info(filepath) if ext in self.vid_ext else {}
 
-        # ── .livp：从内部图片提取 EXIF ──
+        # ── .livp：从内部图片提取 EXIF + 视频信息 ──
+        livp_info = {}   # 存放 .livp 专属信息（内部格式/分辨率/视频时长等）
         if ext == '.livp' and HAS_LIVP:
             try:
                 livp = LivpFile(filepath)
                 img_pil = livp.image_pil()
-                exif = getattr(img_pil, '_getexif', lambda: None)()
                 w, h = img_pil.width, img_pil.height
+                livp_info['img_w'] = w
+                livp_info['img_h'] = h
+                livp_info['img_fmt'] = (livp.image_format or 'jpeg').upper()
+                livp_info['img_name'] = livp.image_name or ''
+                livp_info['vid_name'] = livp.video_name or ''
+                # EXIF from internal image
+                exif = getattr(img_pil, '_getexif', lambda: None)()
+                if exif:
+                    # 尝试用内部 EXIF 填充 exif_info（只补空缺）
+                    from PIL.ExifTags import TAGS
+                    _tag_map = {271: '设备_Make', 272: '设备_Model', 33437: 'FNumber',
+                                33434: 'ExposureTime', 34855: 'ISOSpeedRatings',
+                                37386: 'FocalLength', 41989: 'FocalLengthIn35mmFilm',
+                                37385: 'Flash', 40962: 'PixelXDimension', 40963: 'PixelYDimension'}
+                    # 直接调用完整的 EXIF 解析
+                    import io as _io
+                    buf = _io.BytesIO()
+                    img_pil.save(buf, 'JPEG')
+                    buf.seek(0)
+                    _img2 = Image.open(buf)
+                    _ex2 = _img2._getexif()
+                    if _ex2 and not exif_info:
+                        # 临时借用 _get_exif_data 的路径无法处理内存图，直接手动填入
+                        make = _ex2.get(271, '')
+                        model = _ex2.get(272, '')
+                        if make and model:
+                            exif_info['设备'] = model if model.startswith(make) else f"{make} {model}"
+                        fnum = _ex2.get(33437)
+                        if fnum:
+                            try:
+                                exif_info['光圈'] = f"f/{fnum[0]/fnum[1]:.1f}"
+                            except Exception:
+                                pass
+                        exp = _ex2.get(33434)
+                        if exp:
+                            try:
+                                n, d = exp
+                                exif_info['快门'] = f"1/{d}s" if n == 1 else f"{n}/{d}s"
+                            except Exception:
+                                pass
+                        iso = _ex2.get(34855)
+                        if iso:
+                            exif_info['ISO'] = str(iso)
+                        focal = _ex2.get(37386)
+                        if focal:
+                            try:
+                                exif_info['焦距'] = f"{focal[0]/focal[1]:.0f}mm"
+                            except Exception:
+                                pass
+                        focal35 = _ex2.get(41989)
+                        if focal35:
+                            exif_info['等效焦距'] = f"{focal35}mm"
+                        gps = _ex2.get(34853, {})
+                        if isinstance(gps, dict):
+                            lat_dms = gps.get(2)
+                            lat_ref = gps.get(1)
+                            lon_dms = gps.get(4)
+                            lon_ref = gps.get(3)
+                            if lat_dms and lat_ref and lon_dms and lon_ref:
+                                try:
+                                    lat = self._dms_to_decimal(lat_dms, lat_ref)
+                                    lon = self._dms_to_decimal(lon_dms, lon_ref)
+                                    exif_info['GPS纬度'] = f"{lat:.4f}° {lat_ref}"
+                                    exif_info['GPS经度'] = f"{lon:.4f}° {lon_ref}"
+                                except Exception:
+                                    pass
+                # 读取 MOV 视频信息（时长/帧率/分辨率）
+                if HAS_CV2 and livp.video_name:
+                    try:
+                        import io as _io2, tempfile as _tf2
+                        vbytes = livp.video_bytes()
+                        tmp_v = _tf2.NamedTemporaryFile(delete=False, suffix='.mov')
+                        tmp_v.write(vbytes)
+                        tmp_v.close()
+                        cap = cv2.VideoCapture(tmp_v.name)
+                        if cap.isOpened():
+                            vw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                            vh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                            vfps = cap.get(cv2.CAP_PROP_FPS)
+                            vframes = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                            if vw > 0 and vh > 0:
+                                livp_info['vid_res'] = f"{vw}×{vh}"
+                            if vfps > 0 and vframes > 0:
+                                dur = vframes / vfps
+                                livp_info['vid_dur'] = f"{dur:.1f}s"
+                                livp_info['vid_fps'] = f"{vfps:.0f}fps"
+                            cap.release()
+                        try:
+                            os.remove(tmp_v.name)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
             except Exception:
-                img_pil, exif, w, h = None, None, 0, 0
+                img_pil = None
         else:
-            img_pil, w, h = None, 0, 0
+            img_pil = None
 
         # ── 位置信息判断 ──
         has_gps = ('GPS纬度' in exif_info and 'GPS经度' in exif_info)
@@ -2300,7 +2403,11 @@ class Phoo:
         # ── 动图检测 ──
         motion = self._detect_motion_photo(filepath) if ext in self.img_ext else None
         motion_str = ""
-        if motion:
+        if ext == '.livp':
+            # .livp 始终是 Live Photo
+            hover_hint = " (悬停预览)" if HAS_CV2 and livp_info.get('vid_name') else ""
+            motion_str = f"📸 Live Photo{hover_hint}"
+        elif motion:
             motion_labels = {'apple': '🎬 Live Photo', 'android': '🎬 Motion Photo', 'vivo': '🎬 动图'}
             motion_str = motion_labels.get(motion['type'], '🎬 动图')
 
@@ -2312,7 +2419,25 @@ class Phoo:
 
         if not self._info_expanded:
             # ── 简洁模式 ──
-            if ext in self.vid_ext and video_info:
+            if ext == '.livp' and livp_info:
+                # Live Photo 简洁：分辨率 | 设备 | 视频时长
+                livp_parts = []
+                if 'img_w' in livp_info and 'img_h' in livp_info:
+                    livp_parts.append(self._resolution_label(livp_info['img_w'], livp_info['img_h']))
+                if '设备' in exif_info:
+                    livp_parts.append(exif_info['设备'])
+                if 'vid_dur' in livp_info:
+                    livp_parts.append(f"🎬{livp_info['vid_dur']}")
+                if livp_parts:
+                    lines.append("|".join(livp_parts))
+                # 拍摄参数
+                shot_parts = []
+                for k in ('光圈', '快门', 'ISO'):
+                    if k in exif_info:
+                        shot_parts.append(exif_info[k])
+                if shot_parts:
+                    lines.append("|".join(shot_parts))
+            elif ext in self.vid_ext and video_info:
                 # 视频：1080P|60fps|0:12:02
                 vid_parts = []
                 # 分辨率简写
@@ -2364,9 +2489,15 @@ class Phoo:
                 except Exception:
                     pass
 
-            # .livp 的分辨率
-            if ext == '.livp' and img_pil is not None:
-                lines.append(f"📐 分辨率: {img_pil.width} × {img_pil.height}")
+            # .livp 的详细信息
+            if ext == '.livp' and livp_info:
+                if 'img_w' in livp_info:
+                    lines.append(f"📐 照片分辨率: {livp_info['img_w']} × {livp_info['img_h']}")
+                if 'img_fmt' in livp_info:
+                    lines.append(f"🖼️ 照片格式: {livp_info['img_fmt']}")
+                if livp_info.get('vid_name'):
+                    vid_line = f"🎬 视频: {livp_info.get('vid_res', '')} {livp_info.get('vid_fps', '')} {livp_info.get('vid_dur', '')}"
+                    lines.append(vid_line.strip())
 
             try:
                 ctime = datetime.datetime.fromtimestamp(os.path.getctime(filepath))
@@ -2379,7 +2510,7 @@ class Phoo:
             except Exception:
                 pass
 
-            # 图片 EXIF 详情
+            # 图片 EXIF 详情（含 .livp 内部提取的）
             if exif_info:
                 lines.append("── 拍摄设备 ──")
                 for k in ('设备', '镜头', '软件'):
@@ -2707,6 +2838,16 @@ class Phoo:
 
     def _stop_motion_playback(self):
         """停止动图播放，释放资源"""
+        # 取消 .livp 悬停延迟定时器
+        if self._livp_hover_after is not None:
+            self.root.after_cancel(self._livp_hover_after)
+            self._livp_hover_after = None
+        # 解绑悬停事件（切换文件时清除）
+        self._unbind_livp_hover()
+        # 清空 .livp 静态图缓存
+        self._livp_static_img = None
+        self._livp_video_path = None
+
         self._motion_playing = False
         if self._motion_after_id is not None:
             self.root.after_cancel(self._motion_after_id)
@@ -2721,6 +2862,49 @@ class Phoo:
             except Exception:
                 pass
             self._motion_temp_file = None
+
+    def _bind_livp_hover(self):
+        """为预览区绑定 .livp 悬停事件"""
+        self.img_label.bind('<Enter>', self._livp_hover_enter)
+        self.img_label.bind('<Leave>', self._livp_hover_leave)
+
+    def _unbind_livp_hover(self):
+        """解绑 .livp 悬停事件"""
+        try:
+            self.img_label.unbind('<Enter>')
+            self.img_label.unbind('<Leave>')
+        except Exception:
+            pass
+
+    def _livp_hover_enter(self, event=None):
+        """鼠标进入预览区：0.2s 后开始播放 .livp 视频"""
+        if self._livp_hover_after is not None:
+            self.root.after_cancel(self._livp_hover_after)
+        if self._livp_video_path and HAS_CV2:
+            self._livp_hover_after = self.root.after(200, self._livp_start_play)
+
+    def _livp_hover_leave(self, event=None):
+        """鼠标离开预览区：取消定时，停止播放，恢复静态图"""
+        if self._livp_hover_after is not None:
+            self.root.after_cancel(self._livp_hover_after)
+            self._livp_hover_after = None
+        # 停止视频播放（不清理临时文件，因为文件还要用）
+        self._motion_playing = False
+        if self._motion_after_id is not None:
+            self.root.after_cancel(self._motion_after_id)
+            self._motion_after_id = None
+        if self._motion_cap is not None:
+            self._motion_cap.release()
+            self._motion_cap = None
+        # 恢复静态图
+        if self._livp_static_img is not None:
+            self._display_image(self._livp_static_img)
+
+    def _livp_start_play(self):
+        """悬停 0.2s 后触发：开始播放 .livp 内嵌视频"""
+        self._livp_hover_after = None
+        if self._livp_video_path and HAS_CV2:
+            self._start_motion_playback(self._livp_video_path, seek_us=None)
 
     def _add_paired_action(self, src_image, dest_folder, action):
         """联动移动/复制配对文件（Live Photo .mov / vivo .mp4）到 pending_actions"""
