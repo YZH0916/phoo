@@ -109,6 +109,13 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 import subprocess
 
+# ── LIVP（iPhone 实况照片）支持 ──
+try:
+    from livp import LivpFile
+    HAS_LIVP = True
+except ImportError:
+    HAS_LIVP = False
+
 try:
     import cv2
     HAS_CV2 = True
@@ -116,7 +123,7 @@ except ImportError:
     cv2 = None
     HAS_CV2 = False
 
-__version__ = "2.2.8"
+__version__ = "2.2.9"
 
 # ── 默认快捷键配置（最多支持 MAX_FOLDERS 个文件夹）──
 MAX_FOLDERS = 9
@@ -498,7 +505,8 @@ class Phoo:
         self.img_ext = ('.jpg','.jpeg','.png','.gif','.bmp','.tiff','.ico','.heic')
         self.vid_ext = ('.mp4','.avi','.mov','.wmv','.flv','.mkv')
         self.swf_ext = ('.swf',)
-        self.supported_formats = self.img_ext + self.vid_ext + self.swf_ext
+        self.livp_ext = ('.livp',)   # iPhone 实况照片（ZIP 内含 HEIC + MOV）
+        self.supported_formats = self.img_ext + self.vid_ext + self.swf_ext + self.livp_ext
 
         # ── 查重设置 ──
         self.dedup_enabled = BooleanVar(value=False)   # 是否启用查重
@@ -1456,6 +1464,24 @@ class Phoo:
             except Exception:
                 pass
 
+        # ── 1b. .livp 从内部图片读取 EXIF ──
+        if ext == '.livp' and HAS_LIVP:
+            try:
+                livp = LivpFile(filepath)
+                img = livp.image_pil()
+                exif = getattr(img, '_getexif', lambda: None)()
+                if exif:
+                    for tag_id in (36867, 36868, 306):
+                        val = exif.get(tag_id)
+                        if val:
+                            try:
+                                dt = datetime.datetime.strptime(val, "%Y:%m:%d %H:%M:%S")
+                                return dt.strftime("%Y-%m-%d %H:%M")
+                            except ValueError:
+                                pass
+            except Exception:
+                pass
+
         # ── 2. 从文件名解析日期 ──
         #    覆盖常见命名格式：
         #    IMG_20260516_104028 / VID_20260516-104028
@@ -2009,6 +2035,8 @@ class Phoo:
             return "🔖 ICO"
         elif ext == '.heic':
             return "🖼️ HEIC"
+        elif ext == '.livp':
+            return "🎬 Live Photo"
         else:
             return f"📄 {ext}"
 
@@ -2029,6 +2057,38 @@ class Phoo:
                 image="",
                 text=f"Flash 文件：{os.path.basename(f)}\n双击此处用默认程序打开",
                 fg='#1a5fb4', font=FONT_NORMAL, bg='white')
+        elif ext in self.livp_ext:
+            # ── .livp 实况照片：用 LivpFile 提取图片预览 ──
+            if HAS_LIVP:
+                try:
+                    livp = LivpFile(f)
+                    img = livp.image_pil()
+                    self._display_image(img)
+
+                    # 如果有 cv2，用内置 MOV 视频自动播放
+                    if HAS_CV2:
+                        import io, tempfile
+                        vid_bytes = None
+                        try:
+                            vid_bytes = livp.video_bytes()
+                        except Exception:
+                            pass
+                        if vid_bytes:
+                            tmp = tempfile.NamedTemporaryFile(
+                                delete=False, suffix='.mov')
+                            tmp.write(vid_bytes)
+                            tmp.close()
+                            self._motion_temp_file = tmp.name
+                            self._start_motion_playback(tmp.name, seek_us=None)
+                except Exception as e:
+                    self.img_label.config(
+                        text=f"无法加载 .livp：{e}",
+                        image="", fg='red', font=FONT_NORMAL, bg='white')
+            else:
+                self.img_label.config(
+                    image="",
+                    text=f"Live Photo：{os.path.basename(f)}\n（需要 livp.py 模块）\n双击此处用默认程序打开",
+                    fg='#1a5fb4', font=FONT_NORMAL, bg='white')
         elif ext in self.vid_ext:
             # 视频文件：提取首帧缩略图
             if HAS_CV2:
@@ -2218,6 +2278,18 @@ class Phoo:
         exif_info = self._get_exif_data(filepath)
         video_info = self._get_video_info(filepath) if ext in self.vid_ext else {}
 
+        # ── .livp：从内部图片提取 EXIF ──
+        if ext == '.livp' and HAS_LIVP:
+            try:
+                livp = LivpFile(filepath)
+                img_pil = livp.image_pil()
+                exif = getattr(img_pil, '_getexif', lambda: None)()
+                w, h = img_pil.width, img_pil.height
+            except Exception:
+                img_pil, exif, w, h = None, None, 0, 0
+        else:
+            img_pil, w, h = None, 0, 0
+
         # ── 位置信息判断 ──
         has_gps = ('GPS纬度' in exif_info and 'GPS经度' in exif_info)
         if has_gps:
@@ -2291,6 +2363,10 @@ class Phoo:
                     lines.append(f"📐 分辨率: {img.width} × {img.height}")
                 except Exception:
                     pass
+
+            # .livp 的分辨率
+            if ext == '.livp' and img_pil is not None:
+                lines.append(f"📐 分辨率: {img_pil.width} × {img_pil.height}")
 
             try:
                 ctime = datetime.datetime.fromtimestamp(os.path.getctime(filepath))
