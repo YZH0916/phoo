@@ -123,7 +123,7 @@ except ImportError:
     cv2 = None
     HAS_CV2 = False
 
-__version__ = "2.3.1"
+__version__ = "2.8.0"
 
 # ── 默认快捷键配置（最多支持 MAX_FOLDERS 个文件夹）──
 MAX_FOLDERS = 9
@@ -430,12 +430,15 @@ class Phoo:
         self.root = root
         self.root.title(f"图片分类工具 v{__version__}")
         
-        self.config_file = "phoo_config.json"
+        # 始终保存在 phoo.py 所在目录，不受启动方式影响
+        self.config_file = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "phoo_config.json"
+        )
 
         # ── 所有变量必须在 load_config 之前定义 ──
         self.input_folder   = StringVar()
         self.inc_subfolders = BooleanVar(value=False)
-        self.sort_method    = StringVar(value="name")
+        self.sort_method    = StringVar(value="date")
         self.reverse_sort   = BooleanVar(value=False)
         self.copy_mode      = BooleanVar(value=True)
         
@@ -450,6 +453,13 @@ class Phoo:
         ]
         # 自定义快捷键列表
         self.hotkeys = list(DEFAULT_KEYS)
+
+        # ── 扩展配置（不便映射为 tkinter 变量的键值）──
+        self.cfg = {
+            'anim_duration': 130,
+            'motion_play_mode': 'auto',    # 动图播放模式：'auto'=自动播放, 'hover'=悬停播放
+            'video_thumbnail': True,       # 视频文件是否显示缩略图
+        }
 
         # ── 加载配置（在所有变量创建之后）──
         self.load_config()
@@ -500,6 +510,11 @@ class Phoo:
         # ── 旋转状态 ──
         self._current_rotation = 0     # 当前旋转角度（90 的倍数）
 
+        # ── 分类/删除动画状态 ──
+        self._anim_busy = False        # 动画进行中，防止重复触发
+        self._anim_after_id = None     # 动画帧定时器 ID
+        self._anim_cached_img = None   # 动画用的原始 PIL Image（display size）
+
         # ── Live Photo 配对 MOV 集合（被 load_images 排除的 .mov） ──
         self._live_mov_set = set()
 
@@ -514,7 +529,7 @@ class Phoo:
         self.supported_formats = self.img_ext + self.vid_ext + self.swf_ext + self.livp_ext
 
         # ── 查重设置 ──
-        self.dedup_enabled = BooleanVar(value=False)   # 是否启用查重
+        self.dedup_enabled = BooleanVar(value=True)    # 默认启用查重
         self.dedup_mode    = StringVar(value="skip")     # 处理方式：skip=跳过, delete=删除, ask=每次询问
         # 查重缓存：(文件名, 大小) → [输出文件夹中的路径列表]
         self._dedup_hash_cache = {}          # {(fname, fsize): [path1, path2, ...]}
@@ -534,6 +549,76 @@ class Phoo:
     #  UI 构建
     # ──────────────────────────────────────────────
     def build_ui(self):
+        # ── 菜单栏 ──
+        menubar = Menu(self.root)
+        self.root.config(menu=menubar)
+
+        # ── 设置菜单 ──
+        settings_menu = Menu(menubar, tearoff=0)
+
+        # 排序方式 子菜单
+        sort_menu = Menu(settings_menu, tearoff=0)
+        sort_menu.add_radiobutton(label="按时间", variable=self.sort_method,
+                                  value="time", command=self.load_images)
+        sort_menu.add_radiobutton(label="按大小", variable=self.sort_method,
+                                  value="size", command=self.load_images)
+        sort_menu.add_radiobutton(label="按文件名日期", variable=self.sort_method,
+                                  value="date", command=self.load_images)
+        sort_menu.add_radiobutton(label="按名称", variable=self.sort_method,
+                                  value="name", command=self.load_images)
+        sort_menu.add_separator()
+        sort_menu.add_checkbutton(label="倒序排列", variable=self.reverse_sort,
+                                  command=self.load_images)
+        settings_menu.add_cascade(label="排序方式", menu=sort_menu)
+
+        # 缩放模式 子菜单
+        zoom_menu = Menu(settings_menu, tearoff=0)
+        zoom_menu.add_radiobutton(label="完整 (Contain)", variable=self.scale_mode,
+                                  value="完整", command=self.on_display_option_change)
+        zoom_menu.add_radiobutton(label="填充 (Cover)", variable=self.scale_mode,
+                                  value="填充", command=self.on_display_option_change)
+        zoom_menu.add_radiobutton(label="原始 (100%)", variable=self.scale_mode,
+                                  value="原始", command=self.on_display_option_change)
+        zoom_menu.add_separator()
+        zoom_menu.add_checkbutton(label="小图不放大", variable=self.dont_enlarge,
+                                  command=self.on_display_option_change)
+        settings_menu.add_cascade(label="缩放模式", menu=zoom_menu)
+
+        settings_menu.add_separator()
+
+        # 复制/移动 子菜单
+        mode_menu = Menu(settings_menu, tearoff=0)
+        mode_menu.add_radiobutton(label="复制模式（分类时保留原文件）",
+                                  variable=self.copy_mode, value=True)
+        mode_menu.add_radiobutton(label="移动模式（分类时剪切原文件）",
+                                  variable=self.copy_mode, value=False)
+        settings_menu.add_cascade(label="分类方式", menu=mode_menu)
+
+        settings_menu.add_separator()
+
+        # 撤销
+        settings_menu.add_command(label="↩ 撤销上一步 (Ctrl+Z)", command=self.undo)
+
+        settings_menu.add_separator()
+
+        # 查重
+        settings_menu.add_checkbutton(label="启用查重", variable=self.dedup_enabled,
+                                      command=self._on_dedup_toggle)
+        settings_menu.add_command(label="查重设置...", command=self._show_dedup_settings)
+
+        settings_menu.add_separator()
+        settings_menu.add_command(label="常规设置...", command=self._show_general_settings)
+        settings_menu.add_separator()
+        settings_menu.add_command(label="快捷键...", command=self._open_keybind_dialog)
+
+        menubar.add_cascade(label="设置", menu=settings_menu)
+
+        # ── 工具菜单 ──
+        tools_menu = Menu(menubar, tearoff=0)
+        tools_menu.add_command(label="🗓 批量矫正已分类照片日期...",
+                               command=self._batch_fix_dates_in_output_folders)
+        menubar.add_cascade(label="工具", menu=tools_menu)
+
         # ── 工具栏卡片 ──
         toolbar_card = Frame(self.root, bg=COLOR_CARD,
                              highlightbackground=COLOR_BORDER,
@@ -563,66 +648,7 @@ class Phoo:
         # 分隔线
         Frame(toolbar_card, height=1, bg=COLOR_BORDER).pack(fill=X, padx=SPACE_SM)
 
-        # ── 第二行：排序 + 缩放 + 复制/移动 + 撤销 ──
-        line2 = Frame(toolbar_card, bg=COLOR_CARD)
-        line2.pack(fill=X, padx=SPACE_SM, pady=SPACE_XS)
-
-        Label(line2, text="排序：", bg=COLOR_CARD, font=FONT_BOLD,
-              fg=COLOR_TEXT).pack(side=LEFT)
-        sort_frm = Frame(line2, bg=COLOR_CARD)
-        sort_frm.pack(side=LEFT)
-        for txt, val in [("时间↑","time"), ("大小↑","size"), ("名称↑","name")]:
-            Radiobutton(sort_frm, text=txt, variable=self.sort_method,
-                       value=val, command=self.load_images,
-                       bg=COLOR_CARD, activebackground=COLOR_CARD,
-                       fg=COLOR_TEXT, selectcolor=COLOR_ACCENT,
-                       font=FONT_SMALL).pack(side=LEFT, padx=3)
-        Checkbutton(sort_frm, text="倒序", variable=self.reverse_sort,
-                   command=self.load_images,
-                   bg=COLOR_CARD, activebackground=COLOR_CARD,
-                   fg=COLOR_TEXT, selectcolor=COLOR_ACCENT,
-                   font=FONT_SMALL).pack(side=LEFT, padx=SPACE_SM)
-
-        Frame(line2, bg=COLOR_CARD).pack(side=LEFT, fill=X, expand=True)
-
-        Label(line2, text="缩放：", bg=COLOR_CARD, font=FONT_BOLD,
-              fg=COLOR_TEXT).pack(side=LEFT)
-        scale_frame = Frame(line2, bg=COLOR_CARD)
-        scale_frame.pack(side=LEFT, padx=SPACE_XS)
-        ttk.Combobox(scale_frame, textvariable=self.scale_mode,
-                    values=["完整", "填充", "原始"],
-                    state="readonly", width=5).pack(side=LEFT)
-        self.scale_mode.trace_add('write', self.on_display_option_change)
-
-        Checkbutton(line2, text="小图不放大", variable=self.dont_enlarge,
-                   command=self.on_display_option_change,
-                   bg=COLOR_CARD, activebackground=COLOR_CARD,
-                   fg=COLOR_TEXT, selectcolor=COLOR_ACCENT,
-                   font=FONT_SMALL).pack(side=LEFT, padx=SPACE_XS)
-
-        # 复制/移动 + 撤销（右侧）
-        mode_frm = Frame(line2, bg=COLOR_CARD)
-        mode_frm.pack(side=RIGHT)
-        Radiobutton(mode_frm, text="复制", variable=self.copy_mode, value=True,
-                    bg=COLOR_CARD, activebackground=COLOR_CARD,
-                    fg=COLOR_TEXT, selectcolor=COLOR_ACCENT,
-                    font=FONT_SMALL).pack(side=LEFT)
-        Radiobutton(mode_frm, text="移动", variable=self.copy_mode, value=False,
-                    bg=COLOR_CARD, activebackground=COLOR_CARD,
-                    fg=COLOR_TEXT, selectcolor=COLOR_ACCENT,
-                    font=FONT_SMALL).pack(side=LEFT)
-        Label(mode_frm, text="(Tab)", font=FONT_SMALL, fg=COLOR_TEXT_WEAK,
-              bg=COLOR_CARD).pack(side=LEFT, padx=(SPACE_XS, 0))
-        btn_undo = Button(mode_frm, text="↩ 撤销", command=self.undo,
-               bg=COLOR_BTN_ALT, fg=COLOR_BTN_FG, font=FONT_BOLD,
-               padx=10, pady=3, bd=0, cursor='hand2')
-        btn_undo.pack(side=LEFT, padx=(SPACE_MD, 0))
-        _bind_hover(btn_undo, COLOR_BTN_ALT, '#4b5563')
-
-        # 分隔线
-        Frame(toolbar_card, height=1, bg=COLOR_BORDER).pack(fill=X, padx=SPACE_SM)
-
-        # ── 第三行：文件夹数量 + 自定义快捷键 ──
+        # ── 第二行：文件夹数量 + 自定义快捷键 ──
         line3 = Frame(toolbar_card, bg=COLOR_CARD)
         line3.pack(fill=X, padx=SPACE_SM, pady=(SPACE_XS, SPACE_SM))
 
@@ -656,14 +682,6 @@ class Phoo:
               font=FONT_SMALL, fg=COLOR_TEXT_WEAK,
               bg=COLOR_CARD).pack(side=LEFT, padx=(SPACE_MD, 0))
         self._refresh_key_preview()
-
-        # ── 查重按钮（右侧）──
-        btn_dedup = Button(line3, text="🔍 查重",
-               command=self._show_dedup_settings,
-               bg='#e5e7eb', fg=COLOR_TEXT, font=FONT_NORMAL,
-               padx=10, pady=3, bd=0, cursor='hand2')
-        btn_dedup.pack(side=RIGHT, padx=(SPACE_SM, 0))
-        _bind_hover(btn_dedup, '#e5e7eb', '#d1d5db')
 
         # ── 图片预览区 ──
         self.img_frame = Frame(self.root, bg=COLOR_CARD,
@@ -1039,6 +1057,10 @@ class Phoo:
             self.all_images.sort(key=lambda x: os.path.getmtime(x), reverse=not rev)
         elif self.sort_method.get() == "size":
             self.all_images.sort(key=lambda x: os.path.getsize(x), reverse=not rev)
+        elif self.sort_method.get() == "date":
+            self.all_images.sort(
+                key=lambda x: self._parse_filename_date(x) or datetime.datetime.min,
+                reverse=not rev)
         else:
             self.all_images.sort(reverse=rev)
 
@@ -1207,19 +1229,57 @@ class Phoo:
         self._dedup_progress_dlg = dlg
         self._scan_pbar = pbar
 
+    @staticmethod
+    def _normalize_fname(fname):
+        """去除文件名中的常见重复后缀，用于模糊查重。
+
+        支持的后缀模式：
+          - Windows 风格: xxx(1), xxx (1), xxx(2) ...
+          - 中文副本: xxx-副本, xxx - 副本, xxx-副本(1) ...
+          - 英文 Copy: xxx - Copy, xxx-Copy(2), xxx_copy ...
+        迭代剥离，处理链式后缀如 xxx-副本(1).jpg → xxx.jpg
+        """
+        base, ext = os.path.splitext(fname)
+        prev = None
+        while prev != base:
+            prev = base
+            # (N) 后缀: xxx(1), xxx (1)
+            base = re.sub(r'\s*\(\d+\)$', '', base)
+            # -副本 后缀: xxx-副本, xxx - 副本
+            base = re.sub(r'\s*-\s*副本$', '', base)
+            # - Copy / _copy / - Copy (2) 后缀
+            base = re.sub(r'\s*[-_]\s*[Cc]opy(\s*\(\d+\))?$', '', base)
+        return base.strip() + ext
+
+    def _make_dedup_key(self, filepath):
+        """
+        构建查重用的 key：(文件大小, 日期)
+        - 文件大小：字节数，0字节文件返回 None（跳过）
+        - 日期：_parse_filename_date() 返回的 date.date()；无法解析则为 None
+          → 有日期：同大小+同日期 = 重复
+          → 无日期：同大小且日期均为 None = 重复（保守策略，大小相同才命中）
+        """
+        try:
+            fsize = os.path.getsize(filepath)
+            if fsize == 0:
+                return None
+            dt = self._parse_filename_date(filepath)
+            date_key = dt.date() if dt else None
+            return (fsize, date_key)
+        except Exception:
+            return None
+
     def _bg_scan_worker(self, files_to_scan):
         """后台扫描线程"""
         total = len(files_to_scan)
         scanned = 0
         for full in files_to_scan:
             try:
-                fsize = os.path.getsize(full)
-                fname = os.path.basename(full)
-                # 记录（文件名, 大小）作为查重依据
-                key = (fname, fsize)
-                if key not in self._dedup_hash_cache:
-                    self._dedup_hash_cache[key] = []
-                self._dedup_hash_cache[key].append(full)
+                key = self._make_dedup_key(full)
+                if key is not None:
+                    if key not in self._dedup_hash_cache:
+                        self._dedup_hash_cache[key] = []
+                    self._dedup_hash_cache[key].append(full)
             except Exception:
                 pass
 
@@ -1264,7 +1324,7 @@ class Phoo:
 
     def _check_duplicate(self, filepath):
         """
-        检查当前文件是否已在输出文件夹中存在（文件名+大小匹配）
+        检查当前文件是否已在输出文件夹中存在（大小+日期匹配）
         返回：None（不重复）或 {'dst_path': ...}
         """
         if not self.dedup_enabled.get():
@@ -1273,11 +1333,8 @@ class Phoo:
         if not self._dedup_hash_valid:
             self._scan_output_hashes()
 
-        try:
-            fsize = os.path.getsize(filepath)
-            fname = os.path.basename(filepath)
-            key = (fname, fsize)
-        except Exception:
+        key = self._make_dedup_key(filepath)
+        if key is None:
             return None
 
         dup_paths = self._dedup_hash_cache.get(key, [])
@@ -1369,6 +1426,111 @@ class Phoo:
             self.dedup_enabled.set(False)
             return 'proceed'
         return action if action else 'proceed'
+
+    def _show_general_settings(self):
+        """常规设置对话框：动画 + 播放选项"""
+        dlg = Toplevel(self.root)
+        dlg.title("常规设置")
+        dlg.resizable(False, False)
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.configure(bg=COLOR_CARD)
+
+        frm = Frame(dlg, bg=COLOR_CARD, padx=24, pady=18)
+        frm.pack()
+
+        row = 0
+
+        # ── 动画 ──
+        Label(frm, text="── 动画 ──", font=FONT_BOLD, bg=COLOR_CARD,
+              fg=COLOR_TEXT).grid(row=row, column=0, columnspan=2,
+                                  sticky='w', pady=(0, 8))
+        row += 1
+
+        Label(frm, text="动画时长 (ms):", font=FONT_NORMAL, bg=COLOR_CARD,
+              fg=COLOR_TEXT).grid(row=row, column=0, sticky='w')
+        dur_var = IntVar(value=self.cfg.get('anim_duration', 130))
+        Spinbox(frm, from_=30, to=500, increment=10, width=6,
+                textvariable=dur_var, font=FONT_NORMAL,
+                justify=CENTER, state='readonly').grid(
+                row=row, column=1, padx=(14, 0), sticky='w')
+        row += 1
+
+        Label(frm, text="越小越快，推荐 80-200ms", fg=COLOR_TEXT_WEAK,
+              bg=COLOR_CARD, font=FONT_SMALL).grid(
+              row=row, column=0, columnspan=2, sticky='w', pady=(2, 14))
+        row += 1
+
+        # ── 动图播放 ──
+        Label(frm, text="── 动图播放 ──", font=FONT_BOLD, bg=COLOR_CARD,
+              fg=COLOR_TEXT).grid(row=row, column=0, columnspan=2,
+                                  sticky='w', pady=(0, 8))
+        row += 1
+
+        # 二选一 Radio
+        play_mode_var = StringVar(value=self.cfg.get('motion_play_mode', 'auto'))
+
+        Radiobutton(frm, text="自动播放（切换到文件后立即播放视频片段）",
+                    variable=play_mode_var, value='auto',
+                    bg=COLOR_CARD, activebackground=COLOR_CARD,
+                    fg=COLOR_TEXT, selectcolor=COLOR_ACCENT,
+                    font=FONT_SMALL).grid(row=row, column=0, columnspan=2,
+                                          sticky='w', pady=(0, 4))
+        row += 1
+
+        Radiobutton(frm, text="悬停播放（鼠标悬停 0.2s 后播放，适合批量浏览）",
+                    variable=play_mode_var, value='hover',
+                    bg=COLOR_CARD, activebackground=COLOR_CARD,
+                    fg=COLOR_TEXT, selectcolor=COLOR_ACCENT,
+                    font=FONT_SMALL).grid(row=row, column=0, columnspan=2,
+                                          sticky='w', pady=(0, 14))
+        row += 1
+
+        # ── 视频 ──
+        Label(frm, text="── 视频 ──", font=FONT_BOLD, bg=COLOR_CARD,
+              fg=COLOR_TEXT).grid(row=row, column=0, columnspan=2,
+                                  sticky='w', pady=(0, 8))
+        row += 1
+
+        vid_var = BooleanVar(value=self.cfg.get('video_thumbnail', True))
+        Checkbutton(frm, text="视频缩略图预览（显示首帧，关闭可加快切换速度）",
+                    variable=vid_var,
+                    bg=COLOR_CARD, activebackground=COLOR_CARD,
+                    fg=COLOR_TEXT, selectcolor=COLOR_ACCENT,
+                    font=FONT_SMALL).grid(row=row, column=0, columnspan=2,
+                                          sticky='w', pady=(0, 14))
+        row += 1
+
+        # ── 按钮 ──
+        btn_frm = Frame(frm, bg=COLOR_CARD)
+        btn_frm.grid(row=row, column=0, columnspan=2)
+
+        def on_save():
+            self.cfg['anim_duration']    = dur_var.get()
+            self.cfg['motion_play_mode'] = play_mode_var.get()
+            self.cfg['video_thumbnail']  = vid_var.get()
+            self.save_config()
+            if self.all_images:
+                self.show_current()
+            dlg.destroy()
+
+        Button(btn_frm, text="保存", font=FONT_BOLD, padx=20, pady=4,
+               bg=COLOR_BTN, fg=COLOR_BTN_FG, bd=0, cursor='hand2',
+               command=on_save).pack(side=LEFT, padx=(0, 12))
+        _bind_hover(btn_frm.winfo_children()[-1], COLOR_BTN, '#2563eb')
+
+        Button(btn_frm, text="取消", font=FONT_NORMAL, padx=20, pady=4,
+               bd=1, cursor='hand2',
+               command=dlg.destroy).pack(side=LEFT)
+
+        # 居中
+        dlg.update_idletasks()
+        dw, dh = 440, 370
+        x = self.root.winfo_x() + (self.root.winfo_width() - dw) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - dh) // 2
+        dlg.geometry(f"{dw}x{dh}+{x}+{y}")
+
+        dlg.wait_window(dlg)
 
     def _show_dedup_settings(self):
         """查重设置对话框"""
@@ -1818,10 +1980,27 @@ class Phoo:
                 except ValueError:
                     continue
 
+        # 2b. 带点号分隔符的日期时间（如 2023.10.20.15.30.45）
+        dot_dt_patterns = [
+            r'(?<!\d)(\d{4})\.(\d{1,2})\.(\d{1,2})\.(\d{1,2})\.(\d{1,2})\.(\d{1,2})(?!\d)',
+            r'(?<!\d)(\d{4})\.(\d{1,2})\.(\d{1,2})\.(\d{1,2})\.(\d{1,2})(?!\d)',
+        ]
+        for pat in dot_dt_patterns:
+            m = re.search(pat, basename)
+            if m:
+                groups = [int(g) for g in m.groups()]
+                try:
+                    dt = datetime.datetime(*groups[:6])
+                    if self._is_valid_date(dt):
+                        return dt
+                except ValueError:
+                    continue
+
         # 3. 仅日期（年月日）
         date_patterns = [
             r'(\d{4})[-_](\d{2})[-_](\d{2})',
             r'(?<!\d)(\d{4})(\d{2})(\d{2})(?!\d)',
+            r'(?<!\d)(\d{4})\.(\d{1,2})\.(\d{1,2})(?!\d)',   # 2023.10.20 点号格式
         ]
         for pat in date_patterns:
             m = re.search(pat, basename)
@@ -1930,6 +2109,98 @@ class Phoo:
         except Exception:
             return False
 
+    def _batch_fix_dates_in_output_folders(self):
+        """
+        批量矫正所有已分类照片（输出文件夹）的文件日期。
+        遍历所有输出文件夹，对能从文件名解析到日期的文件调用 _fix_file_date()。
+        弹出进度对话框，结束后汇报统计结果。
+        """
+        import threading
+
+        n = self.folder_count_var.get()
+        files_to_fix = []
+        for i in range(n):
+            path = self.output_folders[i]["path"].get()
+            if not path or not os.path.isdir(path):
+                continue
+            for f in os.listdir(path):
+                full = os.path.join(path, f)
+                if os.path.isfile(full) and f.lower().endswith(self.supported_formats):
+                    files_to_fix.append(full)
+
+        total = len(files_to_fix)
+        if total == 0:
+            messagebox.showinfo("批量矫正日期", "所有输出文件夹中没有找到图片/视频文件。\n请先设置输出文件夹。")
+            return
+
+        # ── 进度对话框 ──
+        dlg = Toplevel(self.root)
+        dlg.title("批量矫正日期")
+        dlg.resizable(False, False)
+        dlg.configure(bg=COLOR_CARD)
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.update_idletasks()
+        dw, dh = 420, 150
+        x = self.root.winfo_x() + (self.root.winfo_width() - dw) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - dh) // 2
+        dlg.geometry(f"{dw}x{dh}+{x}+{y}")
+
+        Label(dlg, text="🗓 正在矫正文件日期...", font=FONT_BOLD,
+              bg=COLOR_CARD, fg=COLOR_TEXT).pack(pady=(15, 8))
+
+        style = ttk.Style()
+        style.theme_use('default')
+        style.configure("BatchFix.Horizontal.TProgressbar", thickness=20, borderwidth=0)
+        pbar = ttk.Progressbar(dlg, maximum=total, value=0,
+                               mode='determinate', style="BatchFix.Horizontal.TProgressbar")
+        pbar.pack(fill=X, padx=30, pady=4)
+
+        progress_var = StringVar(value=f"0 / {total}")
+        Label(dlg, textvariable=progress_var, font=FONT_SMALL,
+              bg=COLOR_CARD, fg=COLOR_TEXT_SEC).pack()
+
+        cancel_flag = [False]
+        btn_cancel = Button(dlg, text="取消",
+                            command=lambda: cancel_flag.__setitem__(0, True),
+                            bg=COLOR_BTN, fg=COLOR_BTN_FG, font=FONT_SMALL)
+        btn_cancel.pack(pady=(6, 0))
+
+        results = {'fixed': 0, 'skipped': 0}
+
+        def worker():
+            for idx, filepath in enumerate(files_to_fix):
+                if cancel_flag[0]:
+                    break
+                try:
+                    if self._fix_file_date(filepath):
+                        results['fixed'] += 1
+                    else:
+                        results['skipped'] += 1
+                except Exception:
+                    results['skipped'] += 1
+                # 每5个更新一次 UI
+                if (idx + 1) % 5 == 0 or idx + 1 == total:
+                    self.root.after(0, lambda s=idx+1: (
+                        pbar.__setitem__('value', s),
+                        progress_var.set(f"{s} / {total}"),
+                        dlg.update_idletasks()
+                    ))
+            self.root.after(0, on_done)
+
+        def on_done():
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+            cancelled_msg = "（已取消）\n" if cancel_flag[0] else ""
+            msg = (f"{cancelled_msg}"
+                   f"已矫正：{results['fixed']} 个文件\n"
+                   f"无需矫正/跳过：{results['skipped']} 个文件")
+            messagebox.showinfo("批量矫正日期完成", msg)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     # ── 图片渲染（供 show_current 和旋转共用）─────────────────
     def _display_image(self, img):
         """按当前缩放模式将 PIL Image 显示到预览区（支持当前旋转角度）"""
@@ -1937,6 +2208,9 @@ class Phoo:
         frame_h = self.img_frame.winfo_height() - 10
         if frame_w < 50 or frame_h < 50:
             return
+
+        # 缓存原始 PIL Image 供退出动画使用（旋转前）
+        self._anim_cached_img = img
 
         # 应用旋转
         if self._current_rotation % 360 != 0:
@@ -2045,6 +2319,69 @@ class Phoo:
         else:
             return f"📄 {ext}"
 
+    # ──────────────────────────────────────────────
+    #  动画预加载辅助方法
+    # ──────────────────────────────────────────────
+    def _preload_image(self, filepath):
+        """预加载下一张图片到 display size，返回 PIL Image 或 None。
+
+        根据文件扩展名分支处理，缩放到当前 img_label 的 contain 尺寸。
+        失败时安静返回 None（动画降级到无 crossfade）。"""
+        try:
+            ext = os.path.splitext(filepath)[1].lower()
+            w = self.img_label.winfo_width()
+            h = self.img_label.winfo_height()
+            if w < 50 or h < 50:
+                return None
+
+            if ext in self.vid_ext and HAS_CV2:
+                cap = cv2.VideoCapture(filepath)
+                ret, frame = cap.read()
+                cap.release()
+                if not ret:
+                    return None
+                img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            elif ext in self.livp_ext and HAS_LIVP:
+                img = LivpFile(filepath).image_pil()
+            elif ext not in self.swf_ext and ext not in self.vid_ext:
+                img = Image.open(filepath)
+            else:
+                return None
+
+            # contain 缩放（与 _display_image 一致）
+            ow, oh = img.size
+            scale = min(w / ow, h / oh)
+            if self.dont_enlarge.get():
+                scale = min(scale, 1.0)
+            nw = max(1, int(ow * scale))
+            nh = max(1, int(oh * scale))
+            return img.resize((nw, nh), Image.Resampling.LANCZOS)
+        except Exception:
+            return None
+
+    def _update_info_for_current(self):
+        """仅更新当前文件的信息标签，不重新加载图片。在动画回调中使用。"""
+        if not self.all_images or self.ptr >= len(self.all_images):
+            return
+        f = self.all_images[self.ptr]
+
+        # 重置旋转和动图状态
+        self._current_rotation = 0
+        self._rot_label.config(text="")
+        self._stop_motion_playback()
+
+        # 自动日期校正
+        if self._fix_file_date(f):
+            self._flash_status("📅 已校正文件日期为文件名记录的时间", duration=2500)
+
+        self._update_info_label(f)
+        self._type_label.config(text=self._get_file_type_label(f))
+        self._filename_label.config(text=os.path.basename(f))
+        self.update_status_bar()
+
+        if self.dedup_enabled.get():
+            self.root.after(50, lambda: self._async_check_duplicate(f))
+
     def show_current(self):
         # ── 停止上一次动图播放 ──
         self._stop_motion_playback()
@@ -2087,8 +2424,13 @@ class Phoo:
                             self._livp_video_path = tmp.name
                             self._motion_temp_file = tmp.name  # 交给 _stop_motion_playback 清理
 
-                    # 绑定悬停事件
-                    self._bind_livp_hover()
+                    # 绑定悬停事件（根据配置决定）
+                    play_mode = self.cfg.get('motion_play_mode', 'auto')
+                    if play_mode == 'hover':
+                        self._bind_livp_hover()
+                    elif play_mode == 'auto' and HAS_CV2 and self._livp_video_path:
+                        # 自动播放模式下立即触发 .livp 视频播放
+                        self._start_motion_playback(self._livp_video_path)
 
                 except Exception as e:
                     self.img_label.config(
@@ -2101,7 +2443,7 @@ class Phoo:
                     fg='#1a5fb4', font=FONT_NORMAL, bg='white')
         elif ext in self.vid_ext:
             # 视频文件：提取首帧缩略图
-            if HAS_CV2:
+            if self.cfg.get('video_thumbnail', True) and HAS_CV2:
                 try:
                     self._show_video_thumbnail(f)
                 except Exception as e:
@@ -2120,8 +2462,9 @@ class Phoo:
                 self._display_image(img)
 
                 # ── 检测并自动播放动图 ──
+                play_mode = self.cfg.get('motion_play_mode', 'auto')
                 motion = self._detect_motion_photo(f)
-                if motion and HAS_CV2:
+                if motion and HAS_CV2 and play_mode == 'auto':
                     video_path = motion.get('video_path')
                     if motion.get('embedded') and not video_path:
                         video_path = self._extract_embedded_video(f)
@@ -2132,6 +2475,16 @@ class Phoo:
                     if video_path:
                         seek_us = motion.get('presentation_us')
                         self._start_motion_playback(video_path, seek_us=seek_us)
+                elif motion and HAS_CV2 and play_mode == 'hover':
+                    # 悬停模式：绑定悬停事件，等鼠标悬停后播放
+                    video_path = motion.get('video_path')
+                    if motion.get('embedded') and not video_path:
+                        video_path = self._extract_embedded_video(f)
+                        if video_path:
+                            self._motion_temp_file = video_path
+                    if video_path:
+                        self._livp_video_path = video_path
+                        self._bind_livp_hover()
             except Exception as e:
                 self.img_label.config(text=f"无法加载图片：{e}", fg='red')
 
@@ -2153,7 +2506,7 @@ class Phoo:
             self.root.after(50, lambda: self._async_check_duplicate(f))
 
     def _async_check_duplicate(self, filepath):
-        """异步检查当前文件是否在输出文件夹中存在（文件名+大小匹配）"""
+        """异步检查当前文件是否在输出文件夹中存在（文件大小+日期匹配）"""
         if not self.dedup_enabled.get():
             return
 
@@ -2164,15 +2517,12 @@ class Phoo:
             self._dup_label.config(text="🔄 扫描中...", fg=COLOR_TEXT_SEC)
             return
 
-        # 文件名 + 大小匹配
-        try:
-            fsize = os.path.getsize(filepath)
-            fname = os.path.basename(filepath)
-            key = (fname, fsize)
-        except Exception:
+        # 文件大小 + 日期匹配
+        key = self._make_dedup_key(filepath)
+        if key is None:
             return
 
-        # 查找相同文件名+大小的文件
+        # 查找相同大小+日期的文件
         dup_paths = self._dedup_hash_cache.get(key, [])
         if dup_paths:
             self._dup_label.config(
@@ -2578,6 +2928,9 @@ class Phoo:
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         img = Image.fromarray(frame_rgb)
 
+        # 缓存视频首帧供退出动画使用
+        self._anim_cached_img = img
+
         frame_w = self.img_frame.winfo_width() - 10
         frame_h = self.img_frame.winfo_height() - 10
         if frame_w < 50 or frame_h < 50:
@@ -2784,6 +3137,10 @@ class Phoo:
         else:
             self._stop_motion_playback()
         try:
+            # ── 检查视频文件是否存在（临时文件可能已被清理）──
+            if not os.path.isfile(video_path):
+                self._flash_status("⚠️ 动图视频文件不存在", duration=3000)
+                return
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
                 self._flash_status("⚠️ 无法打开动图视频", duration=3000)
@@ -2792,10 +3149,15 @@ class Phoo:
             if seek_us and seek_us > 0:
                 fps = cap.get(cv2.CAP_PROP_FPS) or 30
                 seek_frame = int(seek_us / 1_000_000 * fps)
+                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                # 越界保护：确保 seek_frame 在有效范围内
+                if total_frames > 0 and seek_frame >= total_frames:
+                    seek_frame = max(0, total_frames - 2)
                 if seek_frame > 0:
                     cap.set(cv2.CAP_PROP_POS_FRAMES, seek_frame)
             self._motion_cap = cap
             self._motion_playing = True
+            self._motion_err_count = 0   # 重置连续错误计数
             self._motion_next_frame()
         except Exception:
             self._stop_motion_playback()
@@ -2841,7 +3203,13 @@ class Phoo:
 
             self.img_label.config(image=ph, text="")
             self.img_label.image = ph
+            self._motion_err_count = 0   # 成功渲染后重置错误计数
         except Exception:
+            # 容忍最多 3 次连续错误（窗口 resize 等瞬态异常）
+            self._motion_err_count = getattr(self, '_motion_err_count', 0) + 1
+            if self._motion_err_count <= 3:
+                self._motion_after_id = self.root.after(33, self._motion_next_frame)
+                return
             self._stop_motion_playback()
             return
 
@@ -3115,18 +3483,32 @@ class Phoo:
         self.update_display()
 
     def delete_current(self):
-        """将当前文件记录到待删除队列（不立即删除）"""
-        if not self.all_images: return
+        """将当前文件记录到待删除队列（不立即删除），并播放向上退出动画"""
+        if not self.all_images or self._anim_busy: return
         src = self.all_images[self.ptr]
-        self.pending_actions.append({
-            'action': 'delete', 'src': src, 'dst': None, 'idx': self.ptr
-        })
-        # ── 联动删除配对文件（Live Photo .mov / vivo .mp4）──
-        self._add_paired_delete(src)
-        self.all_images.pop(self.ptr)
-        if self.all_images:
-            self.ptr = self.ptr % len(self.all_images)
-        self.update_display()
+
+        # ── 预加载下一张图片 ──
+        next_img = None
+        if len(self.all_images) > 1:
+            next_idx = self.ptr + 1 if self.ptr + 1 < len(self.all_images) else 0
+            next_img = self._preload_image(self.all_images[next_idx])
+
+        def _do():
+            self.pending_actions.append({
+                'action': 'delete', 'src': src, 'dst': None, 'idx': self.ptr
+            })
+            self._add_paired_delete(src)
+            self.all_images.pop(self.ptr)
+            if self.all_images:
+                self.ptr = self.ptr % len(self.all_images)
+                if next_img is not None:
+                    self._update_info_for_current()
+                else:
+                    self.update_display()
+            else:
+                self.update_display()
+
+        self._animate_dismiss('up', _do, next_img=next_img)
 
     def go_back(self):
         if not self.all_images: return
@@ -3134,9 +3516,9 @@ class Phoo:
         self.update_display()
 
     def move_to(self, idx):
-        """将当前文件记录到待应用队列（不立即执行）"""
+        """将当前文件记录到待应用队列（不立即执行），并播放向下退出动画"""
         n = self.folder_count_var.get()
-        if not self.all_images or idx >= n: return
+        if not self.all_images or idx >= n or self._anim_busy: return
         fo = self.output_folders[idx]["path"].get()
         if not fo:
             messagebox.showwarning("提示", f"请先选择 文件夹{idx+1} 的路径")
@@ -3152,22 +3534,162 @@ class Phoo:
             dst = os.path.join(fo, f"{base}_{c}{ext}")
             c += 1
 
-        # 记录到待应用队列，不立即执行
         action = 'copy' if self.copy_mode.get() else 'move'
         rotation = self._current_rotation if self._current_rotation % 360 != 0 else 0
         self.pending_actions.append({
             'action': action, 'src': src, 'dst': dst, 'idx': self.ptr,
             'rotation': rotation
         })
-        # ── 联动移动配对文件（Live Photo .mov / vivo .mp4）──
         self._add_paired_action(src, fo, action)
-        # ── 旋转模式时：如果是复制则直接覆盖目标为旋转后版本 ──
-        #    如果是移动则覆盖源文件为旋转后版本（因为移动就是搬走）
-        #    实际保存延迟到 _do_apply 执行时
-        self.all_images.pop(self.ptr)
-        if self.all_images:
-            self.ptr = self.ptr % len(self.all_images)
-        self.update_display()
+
+        # ── 预加载下一张图片 ──
+        next_img = None
+        if len(self.all_images) > 1:
+            next_idx = self.ptr + 1 if self.ptr + 1 < len(self.all_images) else 0
+            next_img = self._preload_image(self.all_images[next_idx])
+
+        def _do():
+            self.all_images.pop(self.ptr)
+            if self.all_images:
+                self.ptr = self.ptr % len(self.all_images)
+                if next_img is not None:
+                    self._update_info_for_current()
+                else:
+                    self.update_display()
+            else:
+                self.update_display()
+
+        self._animate_dismiss('down', _do, next_img=next_img)
+
+    # ──────────────────────────────────────────────
+    #  分类/删除 退出动画（滑动 + 缩小）
+    # ──────────────────────────────────────────────
+    def _animate_dismiss(self, direction, callback, next_img=None):
+        """
+        将当前预览图以滑动+缩小动画退出，完成后执行 callback。
+
+        direction: 'up'（删除）或 'down'（分类）
+        next_img: 预加载的下一张 PIL Image，若提供则交叉淡入。
+        """
+        if self._anim_busy:
+            callback()
+            return
+
+        self._stop_motion_playback()
+
+        photo = self.img_label.cget("image")
+        if not photo:
+            callback()
+            return
+
+        pil_img = getattr(self, '_anim_cached_img', None)
+        if pil_img is None:
+            callback()
+            return
+
+        self._anim_busy = True
+        FRAMES = 8
+        DURATION = self.cfg.get('anim_duration', 130)
+        interval = DURATION // FRAMES
+
+        w_box = self.img_label.winfo_width()
+        h_box = self.img_label.winfo_height()
+        if w_box < 2 or h_box < 2:
+            self._anim_busy = False
+            callback()
+            return
+
+        # ── 背景底色 ──
+        bg_color = tuple(
+            int(COLOR_CARD.lstrip('#')[i:i+2], 16) for i in (0, 2, 4)
+        ) + (255,)
+
+        # ── 当前图：缩放到 display size ──
+        orig_w, orig_h = pil_img.size
+        raw_scale = min(w_box / orig_w, h_box / orig_h)
+        if self.dont_enlarge.get():
+            raw_scale = min(raw_scale, 1.0)
+        disp_w = max(1, int(orig_w * raw_scale))
+        disp_h = max(1, int(orig_h * raw_scale))
+        base_img = pil_img.resize((disp_w, disp_h), Image.Resampling.LANCZOS)
+
+        # ── 下一张：预缩放背景图（静态，仅 next_img 存在时使用）──
+        bg_img = None
+        if next_img is not None:
+            now, noh = next_img.size
+            n_scale = min(w_box / now, h_box / noh)
+            if self.dont_enlarge.get():
+                n_scale = min(n_scale, 1.0)
+            nw = max(1, int(now * n_scale))
+            nh = max(1, int(noh * n_scale))
+            bg_img = next_img.resize((nw, nh), Image.Resampling.LANCZOS)
+            if bg_img.mode != 'RGBA':
+                bg_img = bg_img.convert('RGBA')
+
+        frame_idx = [0]
+
+        def _next_frame():
+            i = frame_idx[0]
+            if i >= FRAMES:
+                # 动画结束
+                if bg_img is not None:
+                    # 最终帧：纯下一张
+                    final = Image.new('RGBA', (w_box, h_box), bg_color)
+                    bx = (w_box - bg_img.width) // 2
+                    by = (h_box - bg_img.height) // 2
+                    final.paste(bg_img, (bx, by), bg_img)
+                    final = final.convert('RGB')
+                    photo_frame = ImageTk.PhotoImage(final)
+                    self.img_label.config(image=photo_frame)
+                    self.img_label.image = photo_frame
+                else:
+                    self.img_label.config(image='')
+
+                # ── 更新动画缓存，确保下次动画使用正确图片 ──
+                if next_img is not None:
+                    self._anim_cached_img = next_img
+
+                self._anim_busy = False
+                self._anim_after_id = None
+                callback()
+                return
+
+            t = (i + 1) / FRAMES
+
+            # ── 当前图：缩放 + 偏移 + 淡出 ──
+            scale = 1.0 - 0.7 * t
+            offset = int(disp_h * 1.2 * t) * (-1 if direction == 'up' else 1)
+            new_w = max(1, int(disp_w * scale))
+            new_h = max(1, int(disp_h * scale))
+            fg = base_img.resize((new_w, new_h), Image.Resampling.BILINEAR)
+            alpha = int(255 * (1.0 - t * 0.6))
+            if fg.mode != 'RGBA':
+                fg = fg.convert('RGBA')
+            r, g, b, a = fg.split()
+            a = a.point(lambda v: int(v * alpha / 255))
+            fg = Image.merge('RGBA', (r, g, b, a))
+
+            # ── 合成顺序：背景 → 下一张 → 当前图 ──
+            canvas = Image.new('RGBA', (w_box, h_box), bg_color)
+
+            if bg_img is not None:
+                bx = (w_box - bg_img.width) // 2
+                by = (h_box - bg_img.height) // 2
+                canvas.paste(bg_img, (bx, by), bg_img)
+
+            fx = (w_box - new_w) // 2
+            fy = (h_box - new_h) // 2 + offset
+            canvas.paste(fg, (fx, fy), fg)
+
+            final = canvas.convert('RGB')
+            photo_frame = ImageTk.PhotoImage(final)
+            self.img_label.config(image=photo_frame)
+            self.img_label.image = photo_frame
+
+            frame_idx[0] += 1
+            self._anim_after_id = self.root.after(interval, _next_frame)
+
+        _next_frame()
 
     def undo(self):
         """从待应用队列撤回最近一条操作，文件回到列表"""
@@ -3281,6 +3803,10 @@ class Phoo:
             'last_anchor':    anchor,
             # ── 窗口几何信息 ──
             'window_geometry': self.root.geometry(),
+            # ── 扩展配置 ──
+            'anim_duration':      self.cfg.get('anim_duration', 130),
+            'motion_play_mode':   self.cfg.get('motion_play_mode', 'auto'),
+            'video_thumbnail':    self.cfg.get('video_thumbnail', True),
         }
         try:
             with open(self.config_file, 'w', encoding='utf-8') as f:
@@ -3295,7 +3821,7 @@ class Phoo:
                     cfg = json.load(f)
                 self.input_folder.set(cfg.get('input_folder', ''))
                 self.inc_subfolders.set(cfg.get('inc_subfolders', False))
-                self.sort_method.set(cfg.get('sort_method', 'name'))
+                self.sort_method.set(cfg.get('sort_method', 'date'))
                 self.reverse_sort.set(cfg.get('reverse_sort', False))
                 self.copy_mode.set(cfg.get('copy_mode', True))
                 self.scale_mode.set(cfg.get('scale_mode', '完整'))
@@ -3309,13 +3835,19 @@ class Phoo:
                     if i < MAX_FOLDERS:
                         self.output_folders[i]["path"].set(p)
                 # ── 恢复查重设置 ──
-                self.dedup_enabled.set(cfg.get('dedup_enabled', False))
+                self.dedup_enabled.set(cfg.get('dedup_enabled', True))   # 默认启用
                 self.dedup_mode.set(cfg.get('dedup_mode', 'skip'))
                 # ── 恢复进度断点 ──
                 self._saved_ptr    = cfg.get('last_ptr', 0)
                 self._saved_anchor = cfg.get('last_anchor', None)
                 # ── 恢复窗口几何信息 ──
                 self._saved_geometry = cfg.get('window_geometry', '')
+                # ── 恢复扩展配置 ──
+                self.cfg['anim_duration']    = cfg.get('anim_duration', 130)
+                self.cfg['motion_play_mode'] = cfg.get('motion_play_mode',
+                    # 兼容旧配置：motion_autoplay=False → hover，否则 auto
+                    'hover' if not cfg.get('motion_autoplay', True) else 'auto')
+                self.cfg['video_thumbnail']  = cfg.get('video_thumbnail', True)
         except:
             print("配置文件丢失或损坏，已恢复默认设置。")
 
@@ -3413,6 +3945,8 @@ class Phoo:
     def open_current_file(self, _):
         if not self.all_images: return
         f = self.all_images[self.ptr]
+        # ── 打开外部程序前先停止动图播放，避免资源冲突 ──
+        self._stop_motion_playback()
         try:
             if sys.platform == 'win32':
                 os.startfile(f)
@@ -3422,8 +3956,55 @@ class Phoo:
                 subprocess.run(['xdg-open', f], check=True)
         except Exception as e:
             messagebox.showerror("错误", f"无法打开文件：{e}")
+        # ── 外部程序打开后恢复预览（延迟 0.5s 等外部程序稳定）──
+        self.root.after(500, self._resume_after_open)
 
-    def on_window_configure(self, event):
+    def _resume_after_open(self):
+        """双击打开外部程序后，恢复预览区：若动图自动播放为开，重新启动播放"""
+        if not self.all_images:
+            return
+        f = self.all_images[self.ptr]
+        ext = os.path.splitext(f)[1].lower()
+        play_mode = self.cfg.get('motion_play_mode', 'auto')
+        # 仅对图片类型尝试重新检测并播放动图（视频和 livp 不自动重启）
+        if ext in self.img_ext:
+            try:
+                img = Image.open(f)
+                self._display_image(img)
+                if play_mode == 'auto' and HAS_CV2:
+                    motion = self._detect_motion_photo(f)
+                    if motion:
+                        video_path = motion.get('video_path')
+                        if motion.get('embedded') and not video_path:
+                            video_path = self._extract_embedded_video(f)
+                            if video_path:
+                                self._motion_temp_file = video_path
+                        if video_path:
+                            seek_us = motion.get('presentation_us')
+                            self._start_motion_playback(video_path, seek_us=seek_us)
+                elif play_mode == 'hover' and HAS_CV2:
+                    motion = self._detect_motion_photo(f)
+                    if motion:
+                        video_path = motion.get('video_path')
+                        if motion.get('embedded') and not video_path:
+                            video_path = self._extract_embedded_video(f)
+                            if video_path:
+                                self._motion_temp_file = video_path
+                        if video_path:
+                            self._livp_video_path = video_path
+                            self._bind_livp_hover()
+            except Exception:
+                pass
+        elif ext in self.livp_ext:
+            # .livp 恢复静态图并按播放模式绑定
+            if self._livp_static_img is not None:
+                self._display_image(self._livp_static_img)
+            if play_mode == 'hover':
+                self._bind_livp_hover()
+            elif play_mode == 'auto' and HAS_CV2 and self._livp_video_path:
+                self._start_motion_playback(self._livp_video_path)
+
+
         if event.widget != self.root:
             return
         
